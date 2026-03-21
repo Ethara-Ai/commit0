@@ -19,6 +19,12 @@
 set -euo pipefail
 
 BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+if [[ -f "${BASE_DIR}/.env" ]]; then
+    set -a
+    source "${BASE_DIR}/.env"
+    set +a
+fi
 REPO_BASE="${BASE_DIR}/repos"
 VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
@@ -138,6 +144,19 @@ resolve_model() {
 }
 
 resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Bedrock Bearer Token Priority
+# ============================================================
+# When AWS_BEARER_TOKEN_BEDROCK is set for Bedrock models, unset IAM
+# credentials so litellm/boto3 cannot fall back to SigV4 signing with
+# an IAM user that may lack bedrock:InvokeModel permissions.
+
+if [[ "$MODEL_NAME" == bedrock/* ]] && [[ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]]; then
+    unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_PROFILE 2>/dev/null || true
+    # Also prevent boto3 from reading ~/.aws/credentials
+    export AWS_SHARED_CREDENTIALS_FILE="/dev/null"
+fi
 
 # ============================================================
 # Resolve Dataset
@@ -484,48 +503,72 @@ EOF
 
 AGENT_ELAPSED=0
 AGENT_RC=0
+MAX_STAGE_RETRIES=3
 
 run_agent() {
     local branch="$1"
     local override="$2"
     local log_dir="$3"
 
-    local cmd=(
-        "$VENV_PYTHON" -m agent run "$branch"
-        --backend "$BACKEND"
-        --agent-config-file "$AGENT_CONFIG"
-        --commit0-config-file "$COMMIT0_CONFIG"
-        --log-dir "$log_dir"
-        --max-parallel-repos 1
-    )
+    local attempt=0
+    local current_timeout="$STAGE_TIMEOUT"
+    local total_elapsed=0
 
-    if [[ "$override" == "true" ]]; then
-        cmd+=(--override-previous-changes)
-    fi
-    cmd+=(--no-show-rich-progress)
+    while [[ $attempt -lt $MAX_STAGE_RETRIES ]]; do
+        attempt=$((attempt + 1))
 
-    local agent_log="${log_dir}/agent_run.log"
-    log "  Running: ${cmd[*]}"
-    log "  Output → ${agent_log}"
+        local cmd=(
+            "$VENV_PYTHON" -m agent run "$branch"
+            --backend "$BACKEND"
+            --agent-config-file "$AGENT_CONFIG"
+            --commit0-config-file "$COMMIT0_CONFIG"
+            --log-dir "$log_dir"
+            --max-parallel-repos 1
+        )
 
-    local start_time
-    start_time=$(date +%s)
+        if [[ "$override" == "true" ]] && [[ $attempt -eq 1 ]]; then
+            cmd+=(--override-previous-changes)
+        fi
+        cmd+=(--no-show-rich-progress)
 
-    set +e
-    timeout "$STAGE_TIMEOUT" "${cmd[@]}" >"$agent_log" 2>&1
-    AGENT_RC=$?
-    set -e
+        local agent_log="${log_dir}/agent_run.log"
+        log "  [Attempt ${attempt}/${MAX_STAGE_RETRIES}] timeout=${current_timeout}s"
+        log "  Running: ${cmd[*]}"
+        log "  Output → ${agent_log}"
 
-    local end_time
-    end_time=$(date +%s)
-    AGENT_ELAPSED=$(( end_time - start_time ))
+        local start_time
+        start_time=$(date +%s)
 
-    if [[ $AGENT_RC -ne 0 ]]; then
-        log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
-        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
-    else
-        log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
-    fi
+        set +e
+        timeout "$current_timeout" "${cmd[@]}" >>"$agent_log" 2>&1
+        AGENT_RC=$?
+        set -e
+
+        local end_time
+        end_time=$(date +%s)
+        local this_elapsed=$(( end_time - start_time ))
+        total_elapsed=$(( total_elapsed + this_elapsed ))
+
+        if [[ $AGENT_RC -eq 124 ]]; then
+            log "  Agent TIMED OUT (attempt ${attempt}) after ${this_elapsed}s"
+            if [[ $attempt -lt $MAX_STAGE_RETRIES ]]; then
+                current_timeout=$(( current_timeout * 2 ))
+                log "  Retrying with timeout=${current_timeout}s (exponential backoff)..."
+                log "  Committed work is preserved — agent will resume from where it left off"
+            else
+                log "  All ${MAX_STAGE_RETRIES} attempts exhausted. Proceeding with partial results."
+            fi
+        elif [[ $AGENT_RC -ne 0 ]]; then
+            log "  Agent FAILED (rc=${AGENT_RC}) in ${this_elapsed}s — last 20 lines:"
+            tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+            break
+        else
+            log "  Agent finished in ${this_elapsed}s (attempt ${attempt}), returncode=${AGENT_RC}"
+            break
+        fi
+    done
+
+    AGENT_ELAPSED="$total_elapsed"
 }
 
 # ============================================================

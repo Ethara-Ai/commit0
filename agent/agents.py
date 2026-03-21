@@ -9,6 +9,84 @@ from aider.io import InputOutput
 import re
 import os
 
+BEDROCK_REGION_MODEL_PRICING = {
+    "moonshotai.kimi-k2.5": {
+        "input_cost_per_token": 7.2e-07,
+        "output_cost_per_token": 3.6e-06,
+        "max_input_tokens": 262144,
+        "max_output_tokens": 262144,
+        "max_tokens": 262144,
+        "mode": "chat",
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_vision": True,
+    },
+}
+
+
+def register_bedrock_arn_pricing(model_name: str) -> None:
+    """Register pricing for Bedrock ARN-based inference profiles in litellm's cost map.
+
+    When using custom inference profile ARNs (e.g. bedrock/converse/arn:aws:bedrock:...),
+    litellm cannot match them to known model pricing. This resolves the ARN to the
+    underlying model ID and copies its pricing into the cost map under the full ARN key.
+    """
+    if "arn:aws:bedrock:" not in model_name:
+        return
+
+    try:
+        import boto3
+
+        region = None
+        for part in model_name.split(":"):
+            if (
+                part.startswith("ap-")
+                or part.startswith("us-")
+                or part.startswith("eu-")
+                or part.startswith("sa-")
+            ):
+                region = part
+                break
+
+        client = boto3.client("bedrock", region_name=region or "ap-south-1")
+        arn = model_name.split("bedrock/")[-1]
+        if arn.startswith("converse/"):
+            arn = arn[len("converse/") :]
+
+        resp = client.get_inference_profile(inferenceProfileIdentifier=arn)
+        models = resp.get("models", [])
+        if models:
+            underlying_model_id = models[0].get("modelArn", "").split("/")[-1]
+            if not underlying_model_id:
+                underlying_model_id = models[0].get("modelId", "")
+
+            from aider.llm import litellm as aider_litellm
+            import litellm
+
+            for base_id, pricing in BEDROCK_REGION_MODEL_PRICING.items():
+                if base_id in underlying_model_id or underlying_model_id in base_id:
+                    litellm.model_cost[model_name] = pricing.copy()
+                    litellm.model_cost[model_name]["litellm_provider"] = "bedrock"
+                    return
+
+            region_key = (
+                f"bedrock/{region}/{underlying_model_id}"
+                if region
+                else f"bedrock/{underlying_model_id}"
+            )
+            if region_key in litellm.model_cost:
+                litellm.model_cost[model_name] = litellm.model_cost[region_key].copy()
+                return
+
+            for key, val in litellm.model_cost.items():
+                if underlying_model_id in key and "bedrock" in key:
+                    litellm.model_cost[model_name] = val.copy()
+                    return
+
+    except Exception:
+        pass
+
 
 def handle_logging(logging_name: str, log_file: Path) -> None:
     """Handle logging for agent"""
@@ -63,10 +141,15 @@ class AiderAgents(Agents):
         self, max_iteration: int, model_name: str, cache_prompts: bool = False
     ):
         super().__init__(max_iteration)
+        register_bedrock_arn_pricing(model_name)
         self.model = Model(model_name)
         self.cache_prompts = cache_prompts
         # Check if API key is set for the model
-        if "gpt" in model_name:
+        if "bedrock" in model_name:
+            api_key = os.environ.get("AWS_ACCESS_KEY_ID", None) or os.environ.get(
+                "AWS_BEARER_TOKEN_BEDROCK", None
+            )
+        elif "gpt" in model_name or "openai" in model_name:
             api_key = os.environ.get("OPENAI_API_KEY", None)
         elif "claude" in model_name:
             api_key = os.environ.get("ANTHROPIC_API_KEY", None)
