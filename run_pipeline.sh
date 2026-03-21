@@ -1,0 +1,1005 @@
+#!/usr/bin/env bash
+# ============================================================
+# 3-Stage SDE-I Trajectory Pipeline for Commit0
+# ============================================================
+#
+# Usage:
+#     bash run_pipeline.sh --model <preset|model_id> --dataset <name>
+#
+# Examples:
+#     bash run_pipeline.sh --model opus --dataset minitorch
+#     bash run_pipeline.sh --model kimi --dataset starlette
+#     bash run_pipeline.sh --model gpt54 --dataset minitorch --branch my-branch
+#     bash run_pipeline.sh --model "bedrock/some-arn" --dataset ./custom_dataset.json --repo-split myrepo
+#     nohup bash run_pipeline.sh --model kimi --dataset minitorch > logs/kimi_minitorch.log 2>&1 &
+#
+# Requirements: jq, bc
+# ============================================================
+
+set -euo pipefail
+
+BASE_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_BASE="${BASE_DIR}/repos"
+VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
+BACKEND="local"
+MAX_ITERATION=3
+
+# ============================================================
+# Argument Parsing
+# ============================================================
+
+MODEL_ARG=""
+DATASET_ARG=""
+BRANCH_OVERRIDE=""
+REPO_SPLIT_OVERRIDE=""
+STAGE_TIMEOUT=7200
+EVAL_TIMEOUT=3600
+
+print_usage() {
+    cat <<'USAGE'
+Usage: run_pipeline.sh --model <preset|model_id> --dataset <name> [OPTIONS]
+
+Required:
+  --model    <preset|id>   Model preset or full model ID
+  --dataset  <name|path>   Dataset name or path to JSON file
+
+Model presets:
+  opus     Bedrock Claude Opus 4.6
+  kimi     Bedrock Kimi K2.5
+  gpt54    OpenAI GPT-5.4
+
+Dataset examples:
+  minitorch            Uses minitorch_dataset.json, repo_split=minitorch
+  starlette            Uses starlette_dataset.json, repo_split=starlette
+  ./my_dataset.json    Uses custom JSON, requires --repo-split
+
+Options:
+  --branch         <name>    Override auto-generated branch name
+  --repo-split     <name>    Override repo_split (required for custom dataset paths)
+  --max-iteration  <n>       Max agent iterations per stage (default: 3)
+  --stage-timeout  <secs>    Stage timeout in seconds (default: 7200)
+  --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
+  --backend        <name>    Backend: local or modal (default: local)
+  -h, --help                 Show this help
+USAGE
+    exit 1
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --model)       [[ $# -lt 2 ]] && { echo "Error: --model requires a value"; exit 1; }; MODEL_ARG="$2";          shift 2 ;;
+        --dataset)     [[ $# -lt 2 ]] && { echo "Error: --dataset requires a value"; exit 1; }; DATASET_ARG="$2";         shift 2 ;;
+        --branch)      [[ $# -lt 2 ]] && { echo "Error: --branch requires a value"; exit 1; }; BRANCH_OVERRIDE="$2";     shift 2 ;;
+        --repo-split)  [[ $# -lt 2 ]] && { echo "Error: --repo-split requires a value"; exit 1; }; REPO_SPLIT_OVERRIDE="$2"; shift 2 ;;
+        --max-iteration) [[ $# -lt 2 ]] && { echo "Error: --max-iteration requires a value"; exit 1; }; MAX_ITERATION="$2";     shift 2 ;;
+        --stage-timeout) [[ $# -lt 2 ]] && { echo "Error: --stage-timeout requires a value"; exit 1; }; STAGE_TIMEOUT="$2";     shift 2 ;;
+        --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
+        --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
+        -h|--help)     print_usage ;;
+        *)
+            echo "Error: Unknown argument '$1'"
+            echo ""
+            print_usage
+            ;;
+    esac
+done
+
+if [[ -z "$MODEL_ARG" ]]; then
+    echo "Error: --model is required"
+    echo ""
+    print_usage
+fi
+
+if [[ -z "$DATASET_ARG" ]]; then
+    echo "Error: --dataset is required"
+    echo ""
+    print_usage
+fi
+
+# ============================================================
+# Resolve Model
+# ============================================================
+
+resolve_model() {
+    local arg="$1"
+    case "$arg" in
+        opus)
+            MODEL_NAME="bedrock/global.anthropic.claude-opus-4-6-v1"
+            MODEL_SHORT="opus4.6"
+            CACHE_PROMPTS="true"
+            ;;
+        kimi)
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/pnymm9v4duzh"
+            MODEL_SHORT="kimi-k2.5"
+            CACHE_PROMPTS="false"
+            ;;
+        gpt54)
+            MODEL_NAME="openai/gpt-5.4"
+            MODEL_SHORT="gpt-5.4"
+            CACHE_PROMPTS="false"
+            ;;
+        *)
+            MODEL_NAME="$arg"
+            MODEL_SHORT=$(echo "$arg" | sed 's|.*/||' | tr -dc 'a-zA-Z0-9._-' | cut -c1-20)
+            if [[ -z "$MODEL_SHORT" ]]; then
+                MODEL_SHORT="custom"
+            fi
+            if [[ "$arg" == bedrock/*claude* ]] || [[ "$arg" == bedrock/*anthropic* ]]; then
+                CACHE_PROMPTS="true"
+            else
+                CACHE_PROMPTS="false"
+            fi
+            # ARN-based bedrock models need converse/ route unless already specified
+            if [[ "$MODEL_NAME" == bedrock/* ]] && [[ "$MODEL_NAME" == *:aws:bedrock:* ]] && [[ "$MODEL_NAME" != bedrock/converse/* ]]; then
+                MODEL_NAME="bedrock/converse/${MODEL_NAME#bedrock/}"
+            fi
+            ;;
+    esac
+}
+
+resolve_model "$MODEL_ARG"
+
+# ============================================================
+# Resolve Dataset
+# ============================================================
+
+resolve_dataset() {
+    local arg="$1"
+
+    # Case 1: explicit path to a JSON file
+    if [[ "$arg" == *.json ]] || [[ "$arg" == */* ]]; then
+        if [[ ! -f "$arg" ]]; then
+            # Try relative to BASE_DIR
+            if [[ -f "${BASE_DIR}/${arg}" ]]; then
+                arg="${BASE_DIR}/${arg}"
+            else
+                echo "Error: Dataset file not found: $arg"
+                exit 1
+            fi
+        fi
+        DATASET_FILE="$arg"
+        # Repo split: use override, or try to extract from filename
+        if [[ -n "$REPO_SPLIT_OVERRIDE" ]]; then
+            REPO_SPLIT="$REPO_SPLIT_OVERRIDE"
+        else
+            # Extract repo name from <name>_dataset.json pattern
+            local basename
+            basename=$(basename "$arg" .json)
+            basename="${basename%_dataset}"
+            REPO_SPLIT="$basename"
+        fi
+        DATASET_SHORT=$(basename "$arg" .json)
+        return
+    fi
+
+    # Case 2: named dataset — look for <name>_dataset.json locally
+    local candidate="${BASE_DIR}/${arg}_dataset.json"
+    if [[ -f "$candidate" ]]; then
+        DATASET_FILE="$candidate"
+        REPO_SPLIT="${REPO_SPLIT_OVERRIDE:-$arg}"
+        DATASET_SHORT="${arg}"
+        return
+    fi
+
+    # Case 3: named split from commit0 constants (e.g., "lite", "all", etc.)
+    # Validate it exists in the SPLIT dict
+    local known_splits
+    known_splits=$("$VENV_PYTHON" -c "
+from commit0.harness.constants import SPLIT
+for k in sorted(SPLIT.keys()):
+    print(k)
+" 2>/dev/null || true)
+
+    if echo "$known_splits" | grep -qx "$arg"; then
+        DATASET_FILE="wentingzhao/commit0_combined"
+        REPO_SPLIT="${REPO_SPLIT_OVERRIDE:-$arg}"
+        DATASET_SHORT="$arg"
+        DATASET_SPLIT="test"
+        return
+    fi
+
+    echo "Error: Cannot resolve dataset '$arg'"
+    echo ""
+    echo "Provide one of:"
+    echo "  - A known name with a local <name>_dataset.json file"
+    echo "  - A path to a .json dataset file"
+    echo "  - A commit0 split name (all, lite, minitorch, etc.)"
+    echo ""
+    echo "Available local datasets:"
+    for f in "${BASE_DIR}"/*_dataset.json; do
+        [[ -f "$f" ]] && echo "  $(basename "${f}" _dataset.json)"
+    done
+    echo ""
+    echo "Available commit0 splits:"
+    echo "  $known_splits" | head -20
+    exit 1
+}
+
+DATASET_FILE=""
+REPO_SPLIT=""
+DATASET_SHORT=""
+DATASET_SPLIT="train"
+resolve_dataset "$DATASET_ARG"
+
+# Build the branch name: aider-<model_short>-<dataset_short>
+BRANCH_NAME="${BRANCH_OVERRIDE:-aider-${MODEL_SHORT}-${DATASET_SHORT}}"
+
+# Paths that incorporate model+dataset for isolation
+RUN_ID=$(echo "${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+LOG_BASE="${BASE_DIR}/logs/agent/${RUN_ID}"
+PIPELINE_LOG="${BASE_DIR}/logs/pipeline_${RUN_ID}_results.json"
+
+# Config files — per-run to allow parallel execution
+COMMIT0_CONFIG="${BASE_DIR}/.commit0_${RUN_ID}.yaml"
+AGENT_CONFIG="${BASE_DIR}/.agent_${RUN_ID}.yaml"
+
+# ============================================================
+# Preflight Checks
+# ============================================================
+
+preflight() {
+    local errors=0
+
+    for cmd in jq bc timeout; do
+        if ! command -v "$cmd" &>/dev/null; then
+            echo "Error: Required command '$cmd' not found"
+            errors=$((errors + 1))
+        fi
+    done
+
+    if [[ ! -x "$VENV_PYTHON" ]]; then
+        echo "Error: Python venv not found at $VENV_PYTHON"
+        errors=$((errors + 1))
+    fi
+
+    if [[ ! -d "$REPO_BASE" ]]; then
+        echo "Error: Repo base directory not found at $REPO_BASE"
+        errors=$((errors + 1))
+    fi
+
+    # Check API keys based on model provider
+    if [[ "$MODEL_NAME" == bedrock/* ]]; then
+        if [[ -z "${AWS_ACCESS_KEY_ID:-}" ]] && [[ -z "${AWS_BEARER_TOKEN_BEDROCK:-}" ]] && [[ -z "${AWS_PROFILE:-}" ]]; then
+            echo "Warning: No AWS credentials detected (AWS_ACCESS_KEY_ID, AWS_BEARER_TOKEN_BEDROCK, or AWS_PROFILE)"
+        fi
+    elif [[ "$MODEL_NAME" == openai/* ]] || [[ "$MODEL_NAME" == gpt* ]]; then
+        if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo "Error: OPENAI_API_KEY not set (required for model: $MODEL_NAME)"
+            errors=$((errors + 1))
+        fi
+    elif [[ "$MODEL_NAME" == *claude* ]] && [[ "$MODEL_NAME" != bedrock/* ]]; then
+        if [[ -z "${ANTHROPIC_API_KEY:-}" ]]; then
+            echo "Error: ANTHROPIC_API_KEY not set (required for model: $MODEL_NAME)"
+            errors=$((errors + 1))
+        fi
+    fi
+
+    # Verify dataset is accessible
+    if [[ "$DATASET_FILE" != wentingzhao/* ]] && [[ ! -f "$DATASET_FILE" ]]; then
+        echo "Error: Dataset file not found: $DATASET_FILE"
+        errors=$((errors + 1))
+    fi
+
+    # Verify the repo directory exists (for local dataset files)
+    if [[ "$DATASET_FILE" != wentingzhao/* ]] && [[ -f "$DATASET_FILE" ]]; then
+        local repos_in_dataset
+        repos_in_dataset=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+for item in data:
+    repo = item['repo'].split('/')[-1]
+    print(repo)
+" 2>/dev/null || true)
+
+        if [[ -n "$repos_in_dataset" ]]; then
+            while IFS= read -r repo; do
+                if [[ ! -d "${REPO_BASE}/${repo}" ]]; then
+                    echo "Error: Repo directory not found: ${REPO_BASE}/${repo}"
+                    echo "  Run: commit0 setup $REPO_SPLIT"
+                    errors=$((errors + 1))
+                fi
+            done <<< "$repos_in_dataset"
+        fi
+    fi
+
+    if [[ "$errors" -gt 0 ]]; then
+        echo ""
+        echo "Preflight failed with $errors error(s). Fix the above and retry."
+        exit 1
+    fi
+
+    # Live model API probe — send a trivial request to verify the model responds
+    preflight_model_api
+}
+
+preflight_model_api() {
+    log "  Probing model API: ${MODEL_NAME} ..."
+
+    local probe_output
+    probe_output=$(mktemp)
+
+    set +e
+    timeout 60 "$VENV_PYTHON" - "$MODEL_NAME" "$CACHE_PROMPTS" <<'PYEOF' >"$probe_output" 2>&1
+import sys, os
+
+model_name = sys.argv[1]
+cache_prompts = sys.argv[2].lower() == "true"
+
+os.environ.setdefault("LITELLM_LOG", "ERROR")
+
+import litellm
+litellm.drop_params = True
+
+from aider.models import Model
+from aider.llm import litellm as aider_litellm
+
+try:
+    m = Model(model_name)
+except Exception as e:
+    print(f"PROBE_FAIL_MODEL: aider Model() init failed: {str(e)[:400]}")
+    sys.exit(1)
+
+messages = [{"role": "user", "content": "Reply with exactly: OK"}]
+
+try:
+    resp = aider_litellm.completion(
+        model=m.name,
+        messages=messages,
+        max_tokens=8,
+    )
+    content = resp.choices[0].message.content.strip()
+    print(f"PROBE_OK: model responded: {content!r}")
+except Exception as e:
+    err = str(e)
+
+    if "AuthenticationError" in err or "InvalidClientTokenId" in err:
+        print(f"PROBE_FAIL_AUTH: {err[:500]}")
+    elif "AccessDeniedException" in err or "not authorized" in err.lower():
+        print(f"PROBE_FAIL_ACCESS: {err[:500]}")
+    elif "ModelNotReady" in err or "not found" in err.lower() or "does not exist" in err.lower():
+        print(f"PROBE_FAIL_MODEL: {err[:500]}")
+    elif "RateLimitError" in err or "ThrottlingException" in err:
+        print(f"PROBE_OK: model reachable (rate-limited): {err[:200]}")
+    elif "cache" in err.lower():
+        print(f"PROBE_FAIL_CACHE: {err[:500]}")
+    else:
+        print(f"PROBE_FAIL_UNKNOWN: {err[:500]}")
+    sys.exit(1)
+PYEOF
+    local probe_rc=$?
+    set -e
+
+    local probe_result
+    probe_result=$(cat "$probe_output")
+    rm -f "$probe_output"
+
+    if [[ $probe_rc -ne 0 ]]; then
+        echo ""
+        echo "========================================"
+        echo "MODEL API PREFLIGHT FAILED"
+        echo "========================================"
+        echo "Model: ${MODEL_NAME}"
+        echo ""
+        echo "$probe_result"
+        echo ""
+
+        if [[ "$probe_result" == *PROBE_FAIL_AUTH* ]]; then
+            echo "Fix: Check your API credentials (AWS keys, OPENAI_API_KEY, etc.)"
+        elif [[ "$probe_result" == *PROBE_FAIL_ACCESS* ]]; then
+            echo "Fix: Your credentials lack permission for this model/ARN."
+            echo "     Verify IAM policy includes bedrock:InvokeModel for this inference profile."
+        elif [[ "$probe_result" == *PROBE_FAIL_MODEL* ]]; then
+            echo "Fix: Model ID or ARN is invalid or not available in this region."
+            echo "     Double-check the model name / inference profile ARN."
+        elif [[ "$probe_result" == *PROBE_FAIL_CACHE* ]]; then
+            echo "Fix: Prompt caching error. CACHE_PROMPTS is set to '${CACHE_PROMPTS}'."
+            echo "     This model may not support prompt caching. Set CACHE_PROMPTS=false."
+        else
+            echo "Fix: Review the error above. The model could not produce a response."
+        fi
+        echo "========================================"
+        echo ""
+        exit 1
+    fi
+
+    log "  $probe_result"
+}
+
+# ============================================================
+# Helpers
+# ============================================================
+
+ts() { date "+%Y-%m-%d %H:%M:%S"; }
+log() { echo "[$(ts)] [${RUN_ID}] $1"; }
+
+# ============================================================
+# Config Writers
+# ============================================================
+
+write_commit0_config() {
+    local ds_value="$DATASET_FILE"
+    # Make local paths relative to BASE_DIR for portability
+    if [[ "$ds_value" == "${BASE_DIR}/"* ]]; then
+        ds_value="./${ds_value#${BASE_DIR}/}"
+    fi
+
+    cat > "$COMMIT0_CONFIG" <<EOF
+base_dir: ${REPO_BASE}
+dataset_name: ${ds_value}
+dataset_split: ${DATASET_SPLIT}
+repo_split: ${REPO_SPLIT}
+EOF
+    log "  Wrote commit0 config: ${COMMIT0_CONFIG}"
+}
+
+write_agent_config() {
+    local run_tests="$1"
+    local use_lint_info="$2"
+    local run_entire_dir_lint="$3"
+    local use_unit_tests_info="$4"
+    local add_import_module_to_context="$5"
+
+    cat > "$AGENT_CONFIG" <<'YAMLEOF'
+agent_name: aider
+YAMLEOF
+    cat >> "$AGENT_CONFIG" <<EOF
+model_name: "${MODEL_NAME}"
+use_user_prompt: false
+user_prompt: 'Here is your task:
+
+  You need to complete the implementations for all functions (i.e., those with pass
+  statements) and pass the unit tests.
+
+  Do not change the names of existing functions or classes, as they may be referenced
+  from other code like unit tests, etc.
+
+  When you generate code, you must maintain the original formatting of the function
+  stubs (such as whitespaces), otherwise we will not able to search/replace blocks
+  for code modifications, and therefore you will receive a score of 0 for your generated
+  code.'
+use_topo_sort_dependencies: true
+add_import_module_to_context: ${add_import_module_to_context}
+use_repo_info: false
+max_repo_info_length: 10000
+use_unit_tests_info: ${use_unit_tests_info}
+max_unit_tests_info_length: 10000
+use_spec_info: false
+max_spec_info_length: 10000
+use_lint_info: ${use_lint_info}
+max_lint_info_length: 10000
+run_entire_dir_lint: ${run_entire_dir_lint}
+pre_commit_config_path: .pre-commit-config.yaml
+run_tests: ${run_tests}
+max_iteration: ${MAX_ITERATION}
+record_test_for_each_commit: false
+cache_prompts: ${CACHE_PROMPTS}
+EOF
+    log "  Wrote agent config: ${AGENT_CONFIG}"
+}
+
+# ============================================================
+# Run Agent
+# ============================================================
+
+AGENT_ELAPSED=0
+AGENT_RC=0
+
+run_agent() {
+    local branch="$1"
+    local override="$2"
+    local log_dir="$3"
+
+    local cmd=(
+        "$VENV_PYTHON" -m agent run "$branch"
+        --backend "$BACKEND"
+        --agent-config-file "$AGENT_CONFIG"
+        --commit0-config-file "$COMMIT0_CONFIG"
+        --log-dir "$log_dir"
+        --max-parallel-repos 1
+    )
+
+    if [[ "$override" == "true" ]]; then
+        cmd+=(--override-previous-changes)
+    fi
+    cmd+=(--no-show-rich-progress)
+
+    local agent_log="${log_dir}/agent_run.log"
+    log "  Running: ${cmd[*]}"
+    log "  Output → ${agent_log}"
+
+    local start_time
+    start_time=$(date +%s)
+
+    set +e
+    timeout "$STAGE_TIMEOUT" "${cmd[@]}" >"$agent_log" 2>&1
+    AGENT_RC=$?
+    set -e
+
+    local end_time
+    end_time=$(date +%s)
+    AGENT_ELAPSED=$(( end_time - start_time ))
+
+    if [[ $AGENT_RC -ne 0 ]]; then
+        log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
+        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+    else
+        log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
+    fi
+}
+
+# ============================================================
+# Run Evaluate
+# ============================================================
+
+EVAL_NUM_PASSED=0
+EVAL_NUM_TESTS=0
+EVAL_PASS_RATE="0.0"
+EVAL_RUNTIME="0.0"
+EVAL_ELAPSED=0
+
+run_evaluate() {
+    local branch="$1"
+    local stage_label="${2:-eval}"
+
+    local cmd=(
+        "$VENV_PYTHON" -m commit0 evaluate
+        --branch "$branch"
+        --backend "$BACKEND"
+        --timeout 300
+        --num-cpus 1
+        --num-workers 1
+        --commit0-config-file "$COMMIT0_CONFIG"
+    )
+
+    local eval_log="${LOG_BASE}/${stage_label}_eval.log"
+    log "  Running evaluation: ${cmd[*]}"
+    log "  Output → ${eval_log}"
+
+    local start_time
+    start_time=$(date +%s)
+
+    set +e
+    timeout "$EVAL_TIMEOUT" "${cmd[@]}" >"$eval_log" 2>&1
+    local eval_rc=$?
+    set -e
+
+    local end_time
+    end_time=$(date +%s)
+    EVAL_ELAPSED=$(( end_time - start_time ))
+
+    log "  Evaluation finished in ${EVAL_ELAPSED}s (rc=${eval_rc})"
+
+    local combined_output
+    combined_output=$(cat "$eval_log")
+
+    parse_eval_output "$combined_output"
+
+    if [[ $eval_rc -ne 0 ]]; then
+        log "  Evaluation FAILED — last 10 lines:"
+        tail -10 "$eval_log" | while IFS= read -r line; do log "    | $line"; done
+    fi
+}
+
+parse_eval_output() {
+    local output="$1"
+
+    EVAL_NUM_PASSED=0
+    EVAL_NUM_TESTS=0
+    EVAL_PASS_RATE="0.0"
+    EVAL_RUNTIME="0.0"
+
+    # Aggregate across all "repo,runtime,passed/total" lines
+    local total_passed=0
+    local total_tests=0
+    local total_runtime="0.0"
+    local found_any="false"
+
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        [[ "$line" == repo,* ]] && continue
+        if [[ "$line" == *","*"/"* ]]; then
+            local runtime passed_total passed total
+            runtime=$(echo "$line" | cut -d',' -f2 | tr -d ' ')
+            passed_total=$(echo "$line" | cut -d',' -f3 | tr -d ' ')
+
+            if [[ "$passed_total" == *"/"* ]]; then
+                passed=$(echo "$passed_total" | cut -d'/' -f1)
+                total=$(echo "$passed_total" | cut -d'/' -f2)
+
+                if [[ "$passed" =~ ^[0-9]+$ ]] && [[ "$total" =~ ^[0-9]+$ ]]; then
+                    total_passed=$((total_passed + passed))
+                    total_tests=$((total_tests + total))
+                    if [[ "$runtime" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+                        total_runtime=$(echo "scale=4; $total_runtime + $runtime" | bc)
+                    fi
+                    found_any="true"
+                fi
+            fi
+        fi
+    done <<< "$output"
+
+    if [[ "$found_any" == "true" ]]; then
+        EVAL_NUM_PASSED="$total_passed"
+        EVAL_NUM_TESTS="$total_tests"
+        EVAL_RUNTIME="$total_runtime"
+        if [[ "$total_tests" -gt 0 ]]; then
+            EVAL_PASS_RATE=$(echo "scale=6; $total_passed / $total_tests" | bc)
+        fi
+    fi
+
+    # Fallback: look for "average pass rate:" line
+    if [[ "$EVAL_PASS_RATE" == "0.0" ]] || [[ "$EVAL_PASS_RATE" == "0" ]]; then
+        local avg_line
+        avg_line=$(echo "$output" | grep -i "average pass rate:" || true)
+        if [[ -n "$avg_line" ]]; then
+            local rate
+            rate=$(echo "$avg_line" | awk -F':' '{print $NF}' | tr -d ' ')
+            if [[ -n "$rate" ]] && [[ "$rate" =~ ^[0-9.]+$ ]]; then
+                EVAL_PASS_RATE="$rate"
+            fi
+        fi
+    fi
+}
+
+# ============================================================
+# Cost Extraction
+# ============================================================
+
+extract_all_stage_costs() {
+    local log_dir="$1"
+
+    if [[ ! -d "$log_dir" ]]; then
+        echo "0.0"
+        return
+    fi
+
+    local total_cost="0.0"
+
+    while IFS= read -r log_file; do
+        local last_cost
+        last_cost=$(grep -oP 'Cost: \$[\d.]+\s+message, \$\K[\d.]+(?=\s+session)' "$log_file" 2>/dev/null | tail -1 || true)
+
+        if [[ -n "$last_cost" ]]; then
+            total_cost=$(echo "scale=4; $total_cost + $last_cost" | bc)
+        fi
+    done < <(find "$log_dir" -name "aider.log" -type f 2>/dev/null)
+
+    echo "$total_cost"
+}
+
+format_pct() {
+    local val="$1"
+    printf "%.1f%%" "$(echo "$val * 100" | bc)"
+}
+
+# ============================================================
+# JSON Results
+# ============================================================
+
+RESULTS_JSON=""
+
+init_results() {
+    RESULTS_JSON=$(jq -n \
+        --arg model "$MODEL_NAME" \
+        --arg model_short "$MODEL_SHORT" \
+        --arg branch "$BRANCH_NAME" \
+        --arg backend "$BACKEND" \
+        --arg repo_split "$REPO_SPLIT" \
+        --arg dataset "$DATASET_FILE" \
+        --arg dataset_short "$DATASET_SHORT" \
+        --argjson max_iter "$MAX_ITERATION" \
+        --arg cache_prompts "$CACHE_PROMPTS" \
+        --arg start_time "$(ts)" \
+        '{
+            model: $model,
+            model_short: $model_short,
+            branch: $branch,
+            backend: $backend,
+            repo_split: $repo_split,
+            dataset: $dataset,
+            dataset_short: $dataset_short,
+            max_iteration: $max_iter,
+            cache_prompts: $cache_prompts,
+            start_time: $start_time
+        }')
+}
+
+save_results() {
+    mkdir -p "$(dirname "$PIPELINE_LOG")"
+    echo "$RESULTS_JSON" | jq '.' > "$PIPELINE_LOG"
+}
+
+# ============================================================
+# Pipeline Stages
+# ============================================================
+
+stage_1_draft() {
+    log "======================================================================"
+    log "STAGE 1: Draft Initial Implementations"
+    log "======================================================================"
+
+    write_agent_config "false" "false" "false" "true" "true"
+
+    local stage_log_dir="${LOG_BASE}/stage1_draft"
+    mkdir -p "$stage_log_dir"
+
+    run_agent "$BRANCH_NAME" "true" "$stage_log_dir"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local cost
+    cost=$(extract_all_stage_costs "$stage_log_dir")
+    log "  Stage 1 cost: \$${cost}"
+
+    run_evaluate "$BRANCH_NAME" "stage1"
+    local eval_time="$EVAL_ELAPSED"
+
+    log "  Stage 1 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Draft (no feedback)" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost "$cost" \
+        --argjson rc "$rc" \
+        --argjson runtime "${EVAL_RUNTIME:-0.0}" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        '.stage1 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd: $cost,
+            returncode: $rc,
+            runtime: $runtime,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate
+        }')
+
+    save_results
+}
+
+stage_2_lint_refine() {
+    log "======================================================================"
+    log "STAGE 2: Refine with Static Analysis (Lint)"
+    log "======================================================================"
+
+    write_agent_config "false" "true" "true" "false" "false"
+
+    local stage_log_dir="${LOG_BASE}/stage2_lint"
+    mkdir -p "$stage_log_dir"
+
+    run_agent "$BRANCH_NAME" "false" "$stage_log_dir"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local s1_cost
+    s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0')
+    local s2_incremental
+    s2_incremental=$(extract_all_stage_costs "$stage_log_dir")
+    local total_cost
+    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc)
+
+    log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost})"
+
+    run_evaluate "$BRANCH_NAME" "stage2"
+    local eval_time="$EVAL_ELAPSED"
+
+    log "  Stage 2 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Lint refine" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost_inc "$s2_incremental" \
+        --argjson cost_cum "$total_cost" \
+        --argjson rc "$rc" \
+        --argjson runtime "${EVAL_RUNTIME:-0.0}" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        '.stage2 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd_incremental: $cost_inc,
+            cost_usd_cumulative: $cost_cum,
+            returncode: $rc,
+            runtime: $runtime,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate
+        }')
+
+    save_results
+}
+
+stage_3_test_refine() {
+    log "======================================================================"
+    log "STAGE 3: Refine with Unit Test Feedback"
+    log "======================================================================"
+
+    write_agent_config "true" "true" "false" "false" "false"
+
+    local stage_log_dir="${LOG_BASE}/stage3_tests"
+    mkdir -p "$stage_log_dir"
+
+    run_agent "$BRANCH_NAME" "false" "$stage_log_dir"
+    local elapsed="$AGENT_ELAPSED"
+    local rc="$AGENT_RC"
+
+    local s2_cumulative
+    s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0')
+    local s3_incremental
+    s3_incremental=$(extract_all_stage_costs "$stage_log_dir")
+    local total_cost
+    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc)
+
+    log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost})"
+
+    run_evaluate "$BRANCH_NAME" "stage3"
+    local eval_time="$EVAL_ELAPSED"
+
+    log "  Stage 3 results: ${EVAL_NUM_PASSED}/${EVAL_NUM_TESTS} ($(format_pct "$EVAL_PASS_RATE"))"
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq \
+        --arg name "Test refine" \
+        --argjson elapsed "$elapsed" \
+        --argjson eval_time "$eval_time" \
+        --argjson cost_inc "$s3_incremental" \
+        --argjson cost_cum "$total_cost" \
+        --argjson rc "$rc" \
+        --argjson runtime "${EVAL_RUNTIME:-0.0}" \
+        --argjson num_passed "$EVAL_NUM_PASSED" \
+        --argjson num_tests "$EVAL_NUM_TESTS" \
+        --argjson pass_rate "$EVAL_PASS_RATE" \
+        '.stage3 = {
+            name: $name,
+            elapsed_s: $elapsed,
+            eval_time_s: $eval_time,
+            cost_usd_incremental: $cost_inc,
+            cost_usd_cumulative: $cost_cum,
+            returncode: $rc,
+            runtime: $runtime,
+            num_passed: $num_passed,
+            num_tests: $num_tests,
+            pass_rate: $pass_rate
+        }')
+
+    save_results
+}
+
+# ============================================================
+# Summary Table
+# ============================================================
+
+print_summary_table() {
+    log ""
+    log "=========================================================================================="
+    log "RESULTS SUMMARY — SDE-I 3-Stage Pipeline"
+    log "Model: ${MODEL_SHORT} (${MODEL_NAME})"
+    log "Dataset: ${DATASET_SHORT} | Repo Split: ${REPO_SPLIT} | Branch: ${BRANCH_NAME}"
+    log "Cache Prompts: ${CACHE_PROMPTS} | Max Iteration: ${MAX_ITERATION} | Backend: ${BACKEND}"
+    log "=========================================================================================="
+    log ""
+
+    printf -v header "%-30s %12s %14s %10s %10s" "Stage" "Pass Rate" "Passed/Total" "Cost (\$)" "Time (s)"
+    log "$header"
+    log "--------------------------------------------------------------------------------"
+
+    for stage_key in stage1 stage2 stage3; do
+        local name passed total pass_rate cost elapsed
+
+        name=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.name // \"—\"")
+        [[ "$name" == "—" ]] && continue
+
+        passed=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.num_passed // 0")
+        total=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.num_tests // 0")
+        pass_rate=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.pass_rate // 0")
+        elapsed=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.elapsed_s // 0")
+
+        if [[ "$stage_key" == "stage1" ]]; then
+            cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd // 0")
+        else
+            cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd_cumulative // 0")
+        fi
+
+        local rate_str cost_str passed_str elapsed_str
+        rate_str=$(format_pct "$pass_rate")
+        cost_str=$(printf "\$%.2f" "$cost")
+        passed_str="${passed}/${total}"
+        elapsed_str=$(printf "%.0f" "$elapsed")
+
+        printf -v row "%-30s %12s %14s %10s %10s" "$name" "$rate_str" "$passed_str" "$cost_str" "$elapsed_str"
+        log "$row"
+    done
+
+    log "--------------------------------------------------------------------------------"
+    log ""
+}
+
+# ============================================================
+# Cleanup
+# ============================================================
+
+PIPELINE_SUCCESS="false"
+
+cleanup() {
+    if [[ "$PIPELINE_SUCCESS" == "true" ]]; then
+        rm -f "$COMMIT0_CONFIG" "$AGENT_CONFIG" 2>/dev/null || true
+        log "Cleaned up per-run config files"
+    else
+        if [[ -f "$COMMIT0_CONFIG" ]] || [[ -f "$AGENT_CONFIG" ]]; then
+            log "Pipeline did not complete successfully. Config files preserved for debugging:"
+            [[ -f "$COMMIT0_CONFIG" ]] && log "  ${COMMIT0_CONFIG}"
+            [[ -f "$AGENT_CONFIG" ]] && log "  ${AGENT_CONFIG}"
+        fi
+    fi
+}
+trap cleanup EXIT
+
+# ============================================================
+# Main
+# ============================================================
+
+main() {
+    log "======================================================================"
+    log "Commit0 SDE-I 3-Stage Pipeline"
+    log "Model:        ${MODEL_NAME} (${MODEL_SHORT})"
+    log "Dataset:      ${DATASET_FILE} (${DATASET_SHORT})"
+    log "Repo Split:   ${REPO_SPLIT}"
+    log "Branch:       ${BRANCH_NAME}"
+    log "Backend:      ${BACKEND}"
+    log "Cache:        ${CACHE_PROMPTS}"
+    log "Max Iter:     ${MAX_ITERATION}"
+    log "Stage Timeout: ${STAGE_TIMEOUT}s | Eval Timeout: ${EVAL_TIMEOUT}s"
+    log "Logs:         ${LOG_BASE}"
+    log "Results:      ${PIPELINE_LOG}"
+    log "Start time:   $(ts)"
+    log "======================================================================"
+
+    preflight
+
+    write_commit0_config
+
+    init_results
+
+    local pipeline_error=""
+
+    if ! stage_1_draft; then
+        pipeline_error="Stage 1 failed"
+        log "PIPELINE ERROR: ${pipeline_error}"
+    fi
+
+    if [[ -z "$pipeline_error" ]]; then
+        if ! stage_2_lint_refine; then
+            pipeline_error="Stage 2 failed"
+            log "PIPELINE ERROR: ${pipeline_error}"
+        fi
+    fi
+
+    if [[ -z "$pipeline_error" ]]; then
+        if ! stage_3_test_refine; then
+            pipeline_error="Stage 3 failed"
+            log "PIPELINE ERROR: ${pipeline_error}"
+        fi
+    fi
+
+    if [[ -n "$pipeline_error" ]]; then
+        RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg err "$pipeline_error" '.error = $err')
+    fi
+
+    RESULTS_JSON=$(echo "$RESULTS_JSON" | jq --arg end "$(ts)" '.end_time = $end')
+
+    print_summary_table
+    save_results
+    log "Results saved to: ${PIPELINE_LOG}"
+    log "Pipeline complete."
+    PIPELINE_SUCCESS="true"
+}
+
+cd "$BASE_DIR"
+main
