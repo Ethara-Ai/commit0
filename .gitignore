@@ -186,4 +186,7 @@ tools/custom_dataset.json
 tools/dataset_entries.json
 tools/dataset_entries_final.json
 tools/test_results/
-tools/run_test_validation.sh
+tools/create_dataset_pipeline.sh
+
+# Dataset pipeline workspace
+dataset_workspace/

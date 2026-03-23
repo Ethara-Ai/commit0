@@ -7,11 +7,17 @@ Replaces function/method bodies with `pass` statements while preserving:
 - Function signatures, decorators, type annotations
 - Docstrings (configurable)
 - Abstract methods, overloads, protocol stubs (already stubs)
+- Python dunder methods (__init__, __str__, __repr__, etc.)
+
+Supports three removal modes (matching the official commit0 paper methodology):
+- "all":       Replace ALL function bodies with pass (keep docstrings)
+- "docstring": Only stub functions that HAVE docstrings; leave others unchanged
+- "combined":  Stub functions with docstrings + REMOVE functions without docstrings entirely
 
 This is the missing tool from commit0 (arXiv:2412.01769, Section 3.2).
 
 Usage:
-    python -m tools.stub /path/to/repo /path/to/output [--strip-docstrings] [--dry-run] [--verbose]
+    python -m tools.stub /path/to/repo /path/to/output [--removal-mode combined] [--strip-docstrings] [--dry-run] [--verbose]
 """
 
 from __future__ import annotations
@@ -58,6 +64,20 @@ def is_test_file(path: Path) -> bool:
         or "/tests/" in str(path)
         or "/test/" in str(path)
     )
+
+
+# Files that should never be stubbed — they define package structure or entry points
+SKIP_FILENAMES: set[str] = {"__init__.py", "__main__.py", "conftest.py"}
+
+
+def should_skip_file(path: Path) -> bool:
+    """Skip __init__.py, __main__.py, conftest.py, and test files from stubbing."""
+    return path.name in SKIP_FILENAMES or is_test_file(path)
+
+
+def is_dunder_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
+    """Check if a function is a Python dunder/magic method (e.g., __init__, __str__)."""
+    return node.name.startswith("__") and node.name.endswith("__")
 
 
 def is_docstring(node: ast.stmt) -> bool:
@@ -165,11 +185,30 @@ class StubTransformer:
     1. Parse AST to identify function body ranges
     2. Collect replacement ranges (body start line, body end line)
     3. Reconstruct source with bodies replaced
+
+    Supports three removal modes (matching the official commit0 paper):
+    - "all":       Replace ALL function bodies with pass
+    - "docstring": Only stub functions that HAVE docstrings
+    - "combined":  Stub functions with docstrings + REMOVE functions without
     """
 
-    def __init__(self, *, keep_docstrings: bool = True) -> None:
+    VALID_MODES = ("all", "docstring", "combined")
+
+    def __init__(
+        self,
+        *,
+        keep_docstrings: bool = True,
+        removal_mode: str = "all",
+    ) -> None:
+        if removal_mode not in self.VALID_MODES:
+            raise ValueError(
+                f"Invalid removal_mode: {removal_mode!r}. "
+                f"Must be one of {self.VALID_MODES}"
+            )
         self.keep_docstrings = keep_docstrings
+        self.removal_mode = removal_mode
         self.stub_count = 0
+        self.removed_count = 0
 
     def transform_source(self, source: str, filename: str = "<unknown>") -> str | None:
         """Transform a Python source string, returning stubbed version.
@@ -186,23 +225,35 @@ class StubTransformer:
         if not lines:
             return source
 
-        # Collect all function bodies to replace
         replacements = self._collect_replacements(tree, lines)
+        removals = self._collect_removals(tree, lines)
 
-        if not replacements:
+        if not replacements and not removals:
             return source
 
-        replacements = self._remove_nested(replacements)
-        replacements.sort(key=lambda r: r[0], reverse=True)
-
+        all_ops: list[tuple[int, int, str | None]] = []
         for body_start, body_end, indent_str in replacements:
-            new_lines = [f"{indent_str}pass\n"]
+            all_ops.append((body_start, body_end, indent_str))
+        for func_start, func_end in removals:
+            all_ops.append((func_start, func_end, None))
 
-            # Replace lines (body_start and body_end are 0-indexed)
-            lines[body_start : body_end + 1] = new_lines
-            self.stub_count += 1
+        all_ops = self._remove_nested_ops(all_ops)
+        all_ops.sort(key=lambda r: r[0], reverse=True)
 
-        return "".join(lines)
+        for start, end, indent_str in all_ops:
+            if indent_str is None:
+                lines[start : end + 1] = []
+                self.removed_count += 1
+            else:
+                lines[start : end + 1] = [f"{indent_str}pass\n"]
+                self.stub_count += 1
+
+        result = "".join(lines)
+
+        if self.removal_mode == "combined" and removals:
+            result = self._fix_empty_classes(result, filename)
+
+        return result
 
     def _collect_replacements(
         self,
@@ -216,49 +267,120 @@ class StubTransformer:
             if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
 
-            # Skip functions that should be preserved
             if has_abstractmethod(node):
                 continue
             if has_overload(node):
                 continue
             if is_already_stub(node):
                 continue
+            if is_dunder_method(node):
+                continue
             if isinstance(node, ast.FunctionDef) and is_pure_assignment_init(node):
+                continue
+
+            has_doc = bool(node.body and is_docstring(node.body[0]))
+
+            if self.removal_mode == "docstring" and not has_doc:
+                continue
+            if self.removal_mode == "combined" and not has_doc:
                 continue
 
             body = node.body
             if not body:
                 continue
 
-            # Determine body range (1-indexed in AST, convert to 0-indexed)
             body_start_1 = body[0].lineno
             body_end_1 = self._get_end_lineno(body[-1], lines)
 
             body_start_0 = body_start_1 - 1
             body_end_0 = body_end_1 - 1
 
-            # Determine indentation from the first body statement
             indent_str = self._get_indent(lines, body_start_0)
 
-            # Handle docstring preservation
-            # When keep_docstrings is True and body starts with a docstring,
-            # adjust body_start_0 to AFTER the docstring. The docstring stays
-            # in the source untouched — we only replace the code after it.
             if self.keep_docstrings and body and is_docstring(body[0]):
                 doc_node = body[0]
                 doc_end_1 = self._get_end_lineno(doc_node, lines)
                 doc_end_0 = doc_end_1 - 1
 
                 if len(body) > 1:
-                    # There's code after the docstring — stub starts after docstring
                     body_start_0 = doc_end_0 + 1
                 else:
-                    # Only docstring in body — already a valid stub, skip
                     continue
 
             replacements.append((body_start_0, body_end_0, indent_str))
 
         return replacements
+
+    def _collect_removals(
+        self,
+        tree: ast.Module,
+        lines: list[str],
+    ) -> list[tuple[int, int]]:
+        """Collect (func_start_0idx, func_end_0idx) for functions to remove entirely.
+
+        Only applies in 'combined' mode: functions WITHOUT docstrings are removed.
+        """
+        if self.removal_mode != "combined":
+            return []
+
+        removals: list[tuple[int, int]] = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+
+            if has_abstractmethod(node):
+                continue
+            if has_overload(node):
+                continue
+            if is_already_stub(node):
+                continue
+            if is_dunder_method(node):
+                continue
+            if isinstance(node, ast.FunctionDef) and is_pure_assignment_init(node):
+                continue
+
+            has_doc = bool(node.body and is_docstring(node.body[0]))
+
+            if has_doc:
+                continue
+
+            func_start_0 = node.lineno - 1
+            for dec in node.decorator_list:
+                func_start_0 = min(func_start_0, dec.lineno - 1)
+            func_end_0 = self._get_end_lineno(node, lines) - 1
+
+            removals.append((func_start_0, func_end_0))
+
+        return removals
+
+    def _fix_empty_classes(self, source: str, filename: str) -> str:
+        """After removing functions, replace empty class bodies with `pass`."""
+        try:
+            tree = ast.parse(source, filename=filename)
+        except SyntaxError:
+            return source
+
+        lines = source.splitlines(keepends=True)
+        fixes: list[tuple[int, str]] = []
+
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            non_pass = [s for s in node.body if not isinstance(s, ast.Pass)]
+            if non_pass:
+                continue
+            if len(node.body) == 1 and isinstance(node.body[0], ast.Pass):
+                continue
+            if not node.body:
+                body_line = node.end_lineno - 1 if node.end_lineno else node.lineno - 1
+                indent = self._get_indent(lines, node.lineno - 1) + "    "
+                fixes.append((body_line, f"{indent}pass\n"))
+
+        for line_idx, replacement in sorted(fixes, reverse=True):
+            lines[line_idx : line_idx + 1] = [replacement]
+
+        return "".join(lines)
 
     @staticmethod
     def _remove_nested(
@@ -272,6 +394,21 @@ class StubTransformer:
             is_nested = any(ps <= start and end <= pe for ps, pe, _ in result)
             if not is_nested:
                 result.append((start, end, indent))
+
+        return result
+
+    @staticmethod
+    def _remove_nested_ops(
+        ops: list[tuple[int, int, str | None]],
+    ) -> list[tuple[int, int, str | None]]:
+        """Filter out operations whose range is entirely inside another's range."""
+        sorted_by_range = sorted(ops, key=lambda r: (r[0], -r[1]))
+        result: list[tuple[int, int, str | None]] = []
+
+        for start, end, data in sorted_by_range:
+            is_nested = any(ps <= start and end <= pe for ps, pe, _ in result)
+            if not is_nested:
+                result.append((start, end, data))
 
         return result
 
@@ -303,19 +440,23 @@ def stub_file(
     output_path: Path,
     *,
     keep_docstrings: bool = True,
+    removal_mode: str = "all",
     dry_run: bool = False,
-) -> tuple[bool, int]:
+) -> tuple[bool, int, int]:
     """Stub a single Python file.
 
-    Returns (was_modified, stub_count).
+    Returns (was_modified, stub_count, removed_count).
     """
     try:
         source = source_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, PermissionError) as e:
         logger.warning("Cannot read %s: %s — skipping", source_path, e)
-        return False, 0
+        return False, 0, 0
 
-    transformer = StubTransformer(keep_docstrings=keep_docstrings)
+    transformer = StubTransformer(
+        keep_docstrings=keep_docstrings,
+        removal_mode=removal_mode,
+    )
     result = transformer.transform_source(source, str(source_path))
 
     if result is None:
@@ -323,14 +464,14 @@ def stub_file(
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, output_path)
-        return False, 0
+        return False, 0, 0
 
     if result == source:
         # No functions to stub — copy as-is
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(result, encoding="utf-8")
-        return False, 0
+        return False, 0, 0
 
     # Verify the result is valid Python
     try:
@@ -344,13 +485,13 @@ def stub_file(
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, output_path)
-        return False, 0
+        return False, 0, 0
 
     if not dry_run:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(result, encoding="utf-8")
 
-    return True, transformer.stub_count
+    return True, transformer.stub_count, transformer.removed_count
 
 
 def stub_directory(
@@ -358,6 +499,7 @@ def stub_directory(
     output_dir: Path,
     *,
     keep_docstrings: bool = True,
+    removal_mode: str = "all",
     dry_run: bool = False,
     verbose: bool = False,
 ) -> dict:
@@ -371,6 +513,7 @@ def stub_directory(
         "files_skipped": 0,
         "files_copied": 0,
         "total_stubs": 0,
+        "total_removed": 0,
         "test_files_skipped": 0,
         "errors": 0,
     }
@@ -388,34 +531,38 @@ def stub_directory(
         if py_file.suffix == ".pyi":
             continue
 
-        # Skip test files
         rel_path = py_file.relative_to(source_dir)
-        if is_test_file(py_file):
+
+        if should_skip_file(py_file):
             stats["test_files_skipped"] += 1
-            # Copy test files as-is (they need to work for evaluation)
             if not dry_run:
                 out = output_dir / rel_path
                 out.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(py_file, out)
             if verbose:
-                logger.info("  [TEST] %s — copied as-is", rel_path)
+                logger.info("  [SKIP] %s — copied as-is", rel_path)
             continue
 
         stats["files_processed"] += 1
 
         out_path = output_dir / rel_path
-        modified, count = stub_file(
+        modified, count, removed = stub_file(
             py_file,
             out_path,
             keep_docstrings=keep_docstrings,
+            removal_mode=removal_mode,
             dry_run=dry_run,
         )
 
         if modified:
             stats["files_modified"] += 1
             stats["total_stubs"] += count
+            stats["total_removed"] += removed
             if verbose:
-                logger.info("  [STUB] %s — %d function(s) stubbed", rel_path, count)
+                msg = f"  [STUB] {rel_path} — {count} stubbed"
+                if removed:
+                    msg += f", {removed} removed"
+                logger.info(msg)
         else:
             stats["files_copied"] += 1
             if verbose:
@@ -471,6 +618,8 @@ def print_summary(stats: dict, output_dir: Path) -> None:
     print(f"  Files copied (no fn): {stats['files_copied']}")
     print(f"  Test files skipped:   {stats['test_files_skipped']}")
     print(f"  Total stubs created:  {stats['total_stubs']}")
+    if stats.get("total_removed"):
+        print(f"  Functions removed:    {stats['total_removed']}")
     if stats["errors"]:
         print(f"  Errors:               {stats['errors']}")
     print(f"{'=' * 60}")
@@ -489,6 +638,18 @@ def main() -> None:
         "output",
         type=Path,
         help="Output directory for stubbed files",
+    )
+    parser.add_argument(
+        "--removal-mode",
+        choices=("all", "docstring", "combined"),
+        default="all",
+        help=(
+            "How to handle functions: "
+            "'all' = stub everything, "
+            "'docstring' = only stub functions with docstrings, "
+            "'combined' = stub docstring functions + remove non-docstring functions "
+            "(default: all)"
+        ),
     )
     parser.add_argument(
         "--strip-docstrings",
@@ -518,12 +679,15 @@ def main() -> None:
             "Output directory exists: %s — files may be overwritten", args.output
         )
 
-    logger.info("Stubbing %s → %s", args.source, args.output)
+    logger.info(
+        "Stubbing %s → %s (mode=%s)", args.source, args.output, args.removal_mode
+    )
 
     stats = stub_directory(
         args.source,
         args.output,
         keep_docstrings=not args.strip_docstrings,
+        removal_mode=args.removal_mode,
         dry_run=args.dry_run,
         verbose=args.verbose,
     )

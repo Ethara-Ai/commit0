@@ -51,6 +51,19 @@ TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
 from tools.stub import StubTransformer, is_test_file
 
+# Lazy import for spec scraping (optional dependency)
+_scrape_spec_sync = None
+
+
+def _get_scrape_func():
+    """Lazy-load scrape_spec_sync to avoid importing optional deps at module level."""
+    global _scrape_spec_sync
+    if _scrape_spec_sync is None:
+        from tools.scrape_pdf import scrape_spec_sync
+
+        _scrape_spec_sync = scrape_spec_sync
+    return _scrape_spec_sync
+
 
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
 
@@ -175,6 +188,7 @@ def create_stubbed_branch(
     full_name: str,
     src_dir: str | None,
     branch_name: str = "commit0_combined",
+    removal_mode: str = "combined",
 ) -> tuple[str, str]:
     """
     Create the commit0 branch with stubbed code.
@@ -191,17 +205,14 @@ def create_stubbed_branch(
     reference_commit = get_head_sha(repo_dir)
     logger.info("  Reference commit (original): %s", reference_commit[:12])
 
-    # Ensure we're on the default branch
     git(repo_dir, "checkout", default_branch)
 
-    # Create or reset the commit0 branch
     try:
         git(repo_dir, "branch", "-D", branch_name, check=False)
     except Exception:
         pass
     git(repo_dir, "checkout", "-b", branch_name)
 
-    # Determine which directory to stub
     if src_dir:
         stub_target = repo_dir / src_dir
     else:
@@ -210,17 +221,20 @@ def create_stubbed_branch(
     if not stub_target.is_dir():
         raise ValueError(f"src_dir does not exist: {stub_target}")
 
-    # Run stubbing
-    logger.info("  Stubbing source in: %s", stub_target.relative_to(repo_dir))
-    stubber = StubTransformer(keep_docstrings=True)
+    logger.info(
+        "  Stubbing source in: %s (mode=%s)",
+        stub_target.relative_to(repo_dir),
+        removal_mode,
+    )
+    stubber = StubTransformer(keep_docstrings=True, removal_mode=removal_mode)
 
     stubbed_count = 0
+    removed_count = 0
     errors = 0
 
     for py_file in sorted(stub_target.rglob("*.py")):
         rel = py_file.relative_to(repo_dir)
 
-        # Skip test files
         if is_test_file(py_file):
             continue
 
@@ -237,22 +251,42 @@ def create_stubbed_branch(
 
     logger.info("  Stubbed %d files (%d errors)", stubbed_count, errors)
 
-    # Commit the stubbed version
     git(repo_dir, "add", "-A")
 
-    # Check if there are changes
     status = git(repo_dir, "status", "--porcelain")
     if not status:
         logger.warning("  No changes after stubbing — source may already be stubs?")
         base_commit = reference_commit
     else:
+        # Verify that stubbing actually modified code (should have both + and - lines)
+        diff_output = git(repo_dir, "diff", "--cached", "--stat")
+        diff_patch = git(repo_dir, "diff", "--cached")
+        additions = sum(
+            1
+            for line in diff_patch.splitlines()
+            if line.startswith("+") and not line.startswith("+++")
+        )
+        deletions = sum(
+            1
+            for line in diff_patch.splitlines()
+            if line.startswith("-") and not line.startswith("---")
+        )
+        logger.info(
+            "  Diff stats — lines added: %d, lines removed: %d", additions, deletions
+        )
+        if additions == 0 or deletions == 0:
+            raise RuntimeError(
+                f"Stubbing verification failed for {full_name}: "
+                f"additions={additions}, deletions={deletions}. "
+                f"Expected both >0 (stubbing should replace code with pass)."
+            )
+
         git(
             repo_dir,
             "commit",
             "-m",
             f"commit0: stub function bodies for {full_name.split('/')[-1]}\n\n"
-            f"Automated stubbing: {stubbed_count} files modified\n"
-            f"All function/method bodies replaced with `pass`\n"
+            f"Automated stubbing (mode={removal_mode}): {stubbed_count} files modified\n"
             f"Reference implementation: {reference_commit[:12]}",
         )
         base_commit = get_head_sha(repo_dir)
@@ -429,11 +463,10 @@ def create_dataset_entry(
 ) -> dict:
     """Create a RepoInstance-compatible dataset entry."""
     repo_name = full_name.split("/")[-1]
-    fork_repo_name = fork_name.split("/")[-1]
 
     return {
         "instance_id": f"commit-0/{repo_name}",
-        "repo": fork_repo_name,
+        "repo": fork_name,  # Full org/repo path (e.g., "Ethara-Ai/flask")
         "original_repo": full_name,
         "base_commit": base_commit,
         "reference_commit": reference_commit,
@@ -479,22 +512,31 @@ def prepare_repos(
     org: str = DEFAULT_ORG,
     dry_run: bool = False,
     max_repos: int | None = None,
+    removal_mode: str = "combined",
+    scrape_specs: bool = False,
+    specs_dir: str = "./specs",
 ) -> list[dict]:
     """Prepare repos for the dataset."""
     token = os.environ.get("GITHUB_TOKEN")
     entries: list[dict] = []
 
+    if scrape_specs:
+        _get_scrape_func()
+
     for i, candidate in enumerate(candidates):
         if max_repos and i >= max_repos:
             break
 
-        # Skip failed candidates
-        if candidate.get("status") == "fail":
-            logger.info("Skipping failed candidate: %s", candidate["full_name"])
+        # Skip candidates that didn't pass validation
+        status = candidate.get("status", "")
+        if status in ("fail", "clone_failed", "analysis_failed", "pending"):
+            logger.info(
+                "Skipping candidate %s (status=%s)", candidate["full_name"], status
+            )
             continue
 
         full_name = candidate["full_name"]
-        analysis = candidate.get("analysis", {})
+        analysis = candidate.get("analysis") or {}
         src_dir = analysis.get("src_dir")
         test_dir = analysis.get("test_dir")
 
@@ -529,6 +571,7 @@ def prepare_repos(
                 repo_dir,
                 full_name,
                 src_dir,
+                removal_mode=removal_mode,
             )
         except Exception as e:
             logger.error("  Stubbing failed: %s", e)
@@ -541,6 +584,35 @@ def prepare_repos(
 
         setup_dict = generate_setup_dict(repo_dir, full_name)
         test_dict = generate_test_dict(repo_dir, test_dir)
+
+        # Scrape spec PDF if requested and docs URL is available
+        spec_path = None
+        if scrape_specs and setup_dict.get("specification"):
+            repo_name = full_name.split("/")[-1]
+            docs_url = setup_dict["specification"]
+            logger.info("  Scraping spec from: %s", docs_url)
+            try:
+                scrape_fn = _get_scrape_func()
+                spec_path = scrape_fn(
+                    base_url=docs_url,
+                    name=repo_name,
+                    output_dir=specs_dir,
+                    compress=True,
+                )
+                if spec_path:
+                    logger.info("  Spec saved: %s", spec_path)
+                    # Copy spec into repo and commit (matching official build_dataset)
+                    git(repo_dir, "checkout", "commit0_combined")
+                    dest = repo_dir / Path(spec_path).name
+                    shutil.copy2(spec_path, dest)
+                    git(repo_dir, "add", dest.name)
+                    git(repo_dir, "commit", "-m", f"Add spec PDF for {repo_name}")
+                    base_commit = get_head_sha(repo_dir)
+                    logger.info("  Updated base_commit with spec: %s", base_commit[:12])
+                else:
+                    logger.warning("  Spec scraping returned no output")
+            except Exception as e:
+                logger.warning("  Spec scraping failed: %s", e)
 
         # Push to fork
         if not dry_run:
@@ -635,6 +707,24 @@ def main() -> None:
         default=None,
         help="Max repos to prepare",
     )
+    parser.add_argument(
+        "--removal-mode",
+        type=str,
+        choices=["all", "docstring", "combined"],
+        default="combined",
+        help="Stub removal mode: all (replace all bodies), docstring (only functions with docstrings), combined (stub documented + remove undocumented). Default: combined",
+    )
+    parser.add_argument(
+        "--scrape-specs",
+        action="store_true",
+        help="Scrape library documentation into PDF specs (requires pyppeteer, PyMuPDF, PyPDF2)",
+    )
+    parser.add_argument(
+        "--specs-dir",
+        type=str,
+        default="./specs",
+        help="Directory to save scraped spec PDFs (default: ./specs)",
+    )
 
     args = parser.parse_args()
 
@@ -672,6 +762,9 @@ def main() -> None:
         org=args.org,
         dry_run=args.dry_run,
         max_repos=args.max_repos,
+        removal_mode=args.removal_mode,
+        scrape_specs=args.scrape_specs,
+        specs_dir=args.specs_dir,
     )
 
     # Save entries

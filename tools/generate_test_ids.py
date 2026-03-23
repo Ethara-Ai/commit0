@@ -1,0 +1,398 @@
+"""
+Generate pytest test ID files (.bz2) for custom commit0 repos.
+
+Runs `pytest --collect-only -q` against each repo to discover all test node IDs,
+then saves them as bz2-compressed files compatible with commit0's evaluation harness.
+
+Usage:
+    # From dataset entries JSON:
+    python -m tools.generate_test_ids dataset_entries.json --output-dir ./test_ids
+
+    # From a local repo directory:
+    python -m tools.generate_test_ids --repo-dir /path/to/repo --name mylib --output-dir ./test_ids
+
+    # Using Docker (builds image first if needed):
+    python -m tools.generate_test_ids dataset_entries.json --docker --output-dir ./test_ids
+
+    # Install into commit0 data directory:
+    python -m tools.generate_test_ids dataset_entries.json --install
+"""
+
+from __future__ import annotations
+
+import argparse
+import bz2
+import json
+import logging
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
+
+
+def collect_test_ids_local(
+    repo_dir: Path,
+    test_dir: str = "tests",
+    test_cmd: str = "pytest",
+    timeout: int = 300,
+) -> list[str]:
+    """Run pytest --collect-only in a local repo directory to discover test IDs."""
+    cmd = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "--collect-only",
+        "-q",
+        "--no-header",
+        test_dir,
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("  pytest --collect-only timed out after %ds", timeout)
+        return []
+
+    lines = result.stdout.strip().split("\n")
+
+    test_ids = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("=") or line.startswith("-"):
+            continue
+        if line.startswith("no tests ran"):
+            continue
+        if "error" in line.lower() and "::" not in line:
+            continue
+        if "::" in line:
+            test_id = line.split(" ")[0]
+            test_ids.append(test_id)
+
+    return test_ids
+
+
+def collect_test_ids_docker(
+    repo_name: str,
+    test_dir: str = "tests",
+    image_name: str | None = None,
+    timeout: int = 300,
+) -> list[str]:
+    """Run pytest --collect-only inside a Docker container."""
+    if image_name is None:
+        image_name = f"commit0.repo.{repo_name.lower().replace('/', '_')}:v0"
+
+    cmd = [
+        "docker",
+        "run",
+        "--rm",
+        image_name,
+        "bash",
+        "-c",
+        f"cd /testbed && python -m pytest --collect-only -q --no-header {test_dir} 2>/dev/null",
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("  Docker pytest --collect-only timed out after %ds", timeout)
+        return []
+
+    lines = result.stdout.strip().split("\n")
+
+    test_ids = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        if line.startswith("=") or line.startswith("-"):
+            continue
+        if "::" in line:
+            test_id = line.split(" ")[0]
+            test_ids.append(test_id)
+
+    return test_ids
+
+
+def save_test_ids(
+    test_ids: list[str],
+    name: str,
+    output_dir: Path,
+) -> Path:
+    """Save test IDs as a bz2-compressed file."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    name = name.lower().replace(".", "-")
+    output_file = output_dir / f"{name}.bz2"
+
+    content = "\n".join(test_ids)
+    with bz2.open(output_file, "wt") as f:
+        f.write(content)
+
+    return output_file
+
+
+def install_test_ids(
+    source_dir: Path,
+    repo_names: list[str] | None = None,
+) -> int:
+    """Copy test ID .bz2 files into commit0's data directory."""
+    try:
+        import commit0
+
+        data_dir = Path(os.path.dirname(commit0.__file__)) / "data" / "test_ids"
+    except ImportError:
+        logger.error("commit0 package not found — cannot install test IDs")
+        return 0
+
+    data_dir.mkdir(parents=True, exist_ok=True)
+    installed = 0
+
+    for bz2_file in sorted(source_dir.glob("*.bz2")):
+        name = bz2_file.stem
+        if repo_names and name not in [r.lower().replace(".", "-") for r in repo_names]:
+            continue
+
+        dest = data_dir / bz2_file.name
+        import shutil
+
+        shutil.copy2(bz2_file, dest)
+        logger.info("  Installed: %s -> %s", bz2_file.name, dest)
+        installed += 1
+
+    return installed
+
+
+def _find_repo_dir(
+    clone_dir: Path | None,
+    fork_repo: str,
+    original_repo: str,
+) -> Path | None:
+    """Locate the cloned repo directory, checking fork name then original name."""
+    base = clone_dir or Path("./repos_staging")
+    candidates = [fork_repo]
+    if original_repo and original_repo != fork_repo:
+        candidates.append(original_repo)
+
+    for name in candidates:
+        candidate = base / name.replace("/", "__")
+        if candidate.is_dir():
+            return candidate
+
+    return None
+
+
+def generate_for_dataset(
+    dataset_path: Path,
+    output_dir: Path,
+    use_docker: bool = False,
+    clone_dir: Path | None = None,
+    timeout: int = 300,
+    max_repos: int | None = None,
+) -> dict[str, int]:
+    """Generate test IDs for all repos in a dataset entries JSON file."""
+    data = json.loads(dataset_path.read_text())
+
+    if isinstance(data, dict) and "data" in data:
+        entries = data["data"]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        raise ValueError(f"Unknown dataset format in {dataset_path}")
+
+    results: dict[str, int] = {}
+
+    for i, entry in enumerate(entries):
+        if max_repos and i >= max_repos:
+            break
+
+        repo = entry.get("repo", "")
+        repo_name = repo.split("/")[-1] if "/" in repo else repo
+        test_dir = entry.get("test", {}).get("test_dir", "tests")
+        instance_id = entry.get("instance_id", repo_name)
+
+        logger.info(
+            "\n[%d/%d] Collecting test IDs for %s...",
+            i + 1,
+            min(len(entries), max_repos or len(entries)),
+            instance_id,
+        )
+
+        if use_docker:
+            test_ids = collect_test_ids_docker(
+                repo_name=repo_name,
+                test_dir=test_dir,
+                timeout=timeout,
+            )
+        else:
+            repo_dir = _find_repo_dir(clone_dir, repo, entry.get("original_repo", ""))
+
+            if not repo_dir or not repo_dir.is_dir():
+                logger.warning(
+                    "  Repo dir not found — skipping (tried fork + original name)"
+                )
+                results[repo_name] = 0
+                continue
+
+            reference_commit = entry.get("reference_commit")
+            if reference_commit:
+                try:
+                    subprocess.run(
+                        ["git", "checkout", reference_commit],
+                        cwd=repo_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=30,
+                        check=True,
+                    )
+                except Exception as e:
+                    logger.warning("  Could not checkout reference_commit: %s", e)
+
+            test_ids = collect_test_ids_local(
+                repo_dir=repo_dir,
+                test_dir=test_dir,
+                timeout=timeout,
+            )
+
+        if test_ids:
+            out_file = save_test_ids(test_ids, repo_name, output_dir)
+            logger.info("  Saved %d test IDs to %s", len(test_ids), out_file)
+            results[repo_name] = len(test_ids)
+        else:
+            logger.warning("  No test IDs collected for %s", repo_name)
+            results[repo_name] = 0
+
+    return results
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Generate pytest test ID files for commit0 repos"
+    )
+    parser.add_argument(
+        "dataset_file",
+        nargs="?",
+        help="Input dataset_entries.json or custom_dataset.json",
+    )
+    parser.add_argument(
+        "--repo-dir",
+        type=str,
+        help="Generate for a single local repo directory",
+    )
+    parser.add_argument(
+        "--name",
+        type=str,
+        help="Repo name (required with --repo-dir)",
+    )
+    parser.add_argument(
+        "--test-dir",
+        type=str,
+        default="tests",
+        help="Test directory within repo (default: tests)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="./test_ids",
+        help="Output directory for .bz2 files (default: ./test_ids)",
+    )
+    parser.add_argument(
+        "--clone-dir",
+        type=str,
+        default=None,
+        help="Directory where repos are cloned (default: ./repos_staging)",
+    )
+    parser.add_argument(
+        "--docker",
+        action="store_true",
+        help="Run pytest inside Docker containers (requires built images)",
+    )
+    parser.add_argument(
+        "--install",
+        action="store_true",
+        help="Install generated .bz2 files into commit0's data directory",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=300,
+        help="Timeout per repo for pytest collection (default: 300s)",
+    )
+    parser.add_argument(
+        "--max-repos",
+        type=int,
+        default=None,
+        help="Max repos to process",
+    )
+
+    args = parser.parse_args()
+    output_dir = Path(args.output_dir)
+
+    if args.repo_dir:
+        if not args.name:
+            parser.error("--name is required with --repo-dir")
+        repo_dir = Path(args.repo_dir)
+        logger.info("Collecting test IDs from %s...", repo_dir)
+
+        test_ids = collect_test_ids_local(
+            repo_dir=repo_dir,
+            test_dir=args.test_dir,
+            timeout=args.timeout,
+        )
+        if test_ids:
+            out_file = save_test_ids(test_ids, args.name, output_dir)
+            logger.info("Saved %d test IDs to %s", len(test_ids), out_file)
+        else:
+            logger.error("No test IDs collected")
+            sys.exit(1)
+
+    elif args.dataset_file:
+        dataset_path = Path(args.dataset_file)
+        if not dataset_path.exists():
+            parser.error(f"File not found: {dataset_path}")
+
+        clone_dir = Path(args.clone_dir) if args.clone_dir else None
+
+        results = generate_for_dataset(
+            dataset_path=dataset_path,
+            output_dir=output_dir,
+            use_docker=args.docker,
+            clone_dir=clone_dir,
+            timeout=args.timeout,
+            max_repos=args.max_repos,
+        )
+
+        total = sum(results.values())
+        repos_with_tests = sum(1 for v in results.values() if v > 0)
+        logger.info(
+            "\nDone: %d test IDs across %d repos (%d repos had no tests)",
+            total,
+            len(results),
+            len(results) - repos_with_tests,
+        )
+    else:
+        parser.error("Provide either dataset_file or --repo-dir")
+        return
+
+    if args.install:
+        installed = install_test_ids(output_dir)
+        logger.info("Installed %d test ID files into commit0 data directory", installed)
+
+
+if __name__ == "__main__":
+    main()
