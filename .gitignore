@@ -177,7 +177,6 @@ split_ethara.py
 AGENTS.md
 claudeKaiju.json
 gpt54.json
-.aider.model.metadata.json
 
 # Pipeline intermediate data (keep only *.py and *_strict8.json in tools/)
 tools/candidates_*.json
