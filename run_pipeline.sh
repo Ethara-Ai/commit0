@@ -691,24 +691,47 @@ parse_eval_output() {
 
 extract_all_stage_costs() {
     local log_dir="$1"
-
     if [[ ! -d "$log_dir" ]]; then
-        echo "0.0"
+        echo "0.0000"
         return
     fi
-
-    local total_cost="0.0"
-
-    while IFS= read -r log_file; do
-        local last_cost
-        last_cost=$(grep -oP 'Cost: \$[\d.]+\s+message, \$\K[\d.]+(?=\s+session)' "$log_file" 2>/dev/null | tail -1 || true)
-
-        if [[ -n "$last_cost" ]]; then
-            total_cost=$(echo "scale=4; $total_cost + $last_cost" | bc)
-        fi
-    done < <(find "$log_dir" -name "aider.log" -type f 2>/dev/null)
-
-    echo "$total_cost"
+    local err_file="${log_dir}/cost_extract.err"
+    # Fallback if log_dir isn't writable (CI, read-only mounts)
+    [[ -w "$log_dir" ]] || err_file="/dev/null"
+    local result
+    # NOTE: 'PYEOF' is single-quoted to prevent shell expansion of $ in regex
+    result=$("$VENV_PYTHON" - "$log_dir" <<'PYEOF' 2>>"$err_file"
+import os, re, sys
+log_dir = sys.argv[1]
+COST_RE = re.compile(r"Cost:\s+\$\d+\.\d+\s+(?:message|request),\s+\$(\d+\.\d+)\s+session")
+total = 0.0
+try:
+    for root, _dirs, files in os.walk(log_dir):
+        for fname in files:
+            if fname != "aider.log":
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                with open(fpath, encoding="utf-8", errors="replace") as f:
+                    last_match = None
+                    for line in f:
+                        m = COST_RE.search(line)
+                        if m:
+                            last_match = m
+                    if last_match:
+                        total += float(last_match.group(1))
+            except (OSError, ValueError):
+                pass
+except Exception as exc:
+    print(f"cost_extract: {exc}", file=sys.stderr)
+print(f"{total:.4f}")
+PYEOF
+) || true
+    if [[ "$result" =~ ^[0-9]+\.[0-9]+$ ]]; then
+        echo "$result"
+    else
+        echo "0.0000"
+    fi
 }
 
 format_pct() {
@@ -929,12 +952,12 @@ print_summary_table() {
     log "=========================================================================================="
     log ""
 
-    printf -v header "%-30s %12s %14s %10s %10s" "Stage" "Pass Rate" "Passed/Total" "Cost (\$)" "Time (s)"
+    printf -v header "%-30s %12s %14s %12s %14s %10s" "Stage" "Pass Rate" "Passed/Total" "Stage Cost" "Cumul. Cost" "Time (s)"
     log "$header"
-    log "--------------------------------------------------------------------------------"
+    log "--------------------------------------------------------------------------------------------------------------"
 
     for stage_key in stage1 stage2 stage3; do
-        local name passed total pass_rate cost elapsed
+        local name passed total pass_rate stage_cost cumul_cost elapsed
 
         name=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.name // \"—\"")
         [[ "$name" == "—" ]] && continue
@@ -945,22 +968,25 @@ print_summary_table() {
         elapsed=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.elapsed_s // 0")
 
         if [[ "$stage_key" == "stage1" ]]; then
-            cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd // 0")
+            stage_cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd // 0")
+            cumul_cost="$stage_cost"
         else
-            cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd_cumulative // 0")
+            stage_cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd_incremental // 0")
+            cumul_cost=$(echo "$RESULTS_JSON" | jq -r ".${stage_key}.cost_usd_cumulative // 0")
         fi
 
-        local rate_str cost_str passed_str elapsed_str
+        local rate_str stage_cost_str cumul_cost_str passed_str elapsed_str
         rate_str=$(format_pct "$pass_rate")
-        cost_str=$(printf "\$%.2f" "$cost")
+        stage_cost_str=$(printf "\$%.2f" "$stage_cost")
+        cumul_cost_str=$(printf "\$%.2f" "$cumul_cost")
         passed_str="${passed}/${total}"
         elapsed_str=$(printf "%.0f" "$elapsed")
 
-        printf -v row "%-30s %12s %14s %10s %10s" "$name" "$rate_str" "$passed_str" "$cost_str" "$elapsed_str"
+        printf -v row "%-30s %12s %14s %12s %14s %10s" "$name" "$rate_str" "$passed_str" "$stage_cost_str" "$cumul_cost_str" "$elapsed_str"
         log "$row"
     done
 
-    log "--------------------------------------------------------------------------------"
+    log "--------------------------------------------------------------------------------------------------------------"
     log ""
 }
 
