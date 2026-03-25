@@ -115,7 +115,7 @@ resolve_model() {
             CACHE_PROMPTS="true"
             ;;
         kimi)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/pnymm9v4duzh"
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx"
             MODEL_SHORT="kimi-k2.5"
             CACHE_PROMPTS="false"
             ;;

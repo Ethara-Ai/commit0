@@ -1,14 +1,16 @@
 {
-  "bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/pnymm9v4duzh": {
-    "max_input_tokens": 131072,
-    "max_output_tokens": 8192,
-    "max_tokens": 8192,
+  "bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx": {
+    "max_input_tokens": 262144,
+    "max_output_tokens": 262144,
+    "max_tokens": 262144,
     "mode": "chat",
     "edit_format": "diff",
     "input_cost_per_token": 6e-07,
     "output_cost_per_token": 3e-06,
     "litellm_provider": "bedrock",
     "supports_function_calling": true,
+    "supports_system_messages": true,
+    "supports_tool_choice": true,
     "supports_vision": true,
     "supports_assistant_prefill": false
   }
