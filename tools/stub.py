@@ -80,6 +80,183 @@ def is_dunder_method(node: ast.FunctionDef | ast.AsyncFunctionDef) -> bool:
     return node.name.startswith("__") and node.name.endswith("__")
 
 
+def _extract_call_names(node: ast.AST) -> set[str]:
+    """Extract all function/method names being called in an AST node.
+
+    Handles:
+    - Simple calls: foo() -> {"foo"}
+    - Attribute calls: module.foo() -> {"foo"}
+    - Nested calls: foo(bar()) -> {"foo", "bar"}
+    """
+    names: set[str] = set()
+    for child in ast.walk(node):
+        if isinstance(child, ast.Call):
+            func = child.func
+            if isinstance(func, ast.Name):
+                names.add(func.id)
+            elif isinstance(func, ast.Attribute):
+                names.add(func.attr)
+    return names
+
+
+def collect_import_time_names(source_dir: Path) -> set[str]:
+    """Scan all Python files to find function names called at import time.
+
+    Analyzes module-level code, class bodies, and decorators to identify
+    functions that MUST remain implemented for imports to succeed.
+
+    Patterns detected:
+    1. Module-level assignments: `foo = some_func()` -> "some_func"
+    2. Module-level bare calls: `register()` -> "register"
+    3. Decorator factories: `@decorator_factory(args)` -> "decorator_factory"
+    4. Class body assignments: `class C: x = func()` -> "func"
+    5. Metaclass keyword calls: `class C(metaclass=Meta())` -> "Meta"
+    6. Module-level conditionals with calls: `if cond(): ...` -> "cond"
+    """
+    names: set[str] = set()
+
+    for py_file in sorted(source_dir.rglob("*.py")):
+        # Skip directories we don't want
+        rel_parts = py_file.relative_to(source_dir).parts
+        if any(part in SKIP_DIRS for part in rel_parts):
+            continue
+
+        try:
+            source = py_file.read_text(encoding="utf-8")
+            tree = ast.parse(source, str(py_file))
+        except (SyntaxError, UnicodeDecodeError):
+            continue
+
+        for node in tree.body:
+            # 1. Module-level expressions (bare calls, assignments with calls)
+            if isinstance(node, ast.Expr):
+                names.update(_extract_call_names(node))
+
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = getattr(node, "value", None)
+                if value is not None:
+                    names.update(_extract_call_names(value))
+
+            # 2. Function/method decorators (decorator factories)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for dec in node.decorator_list:
+                    if isinstance(dec, ast.Call):
+                        names.update(_extract_call_names(dec))
+                    # Also: @name where name is a variable holding a callable
+                    # e.g., inline_args = v_args(inline=True); @inline_args
+                    # We already catch v_args from the assignment above
+
+            # 3. Class definitions
+            elif isinstance(node, ast.ClassDef):
+                # Metaclass keyword calls
+                for kw in node.keywords:
+                    if isinstance(kw.value, ast.Call):
+                        names.update(_extract_call_names(kw.value))
+
+                # Decorators on the class itself
+                for dec in node.decorator_list:
+                    if isinstance(dec, ast.Call):
+                        names.update(_extract_call_names(dec))
+
+                # Class body: assignments with calls, nested decorators
+                for item in node.body:
+                    if isinstance(item, (ast.Assign, ast.AnnAssign)):
+                        value = getattr(item, "value", None)
+                        if value is not None:
+                            names.update(_extract_call_names(value))
+
+                    elif isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                        for dec in item.decorator_list:
+                            if isinstance(dec, ast.Call):
+                                names.update(_extract_call_names(dec))
+
+                    elif isinstance(item, ast.Expr):
+                        names.update(_extract_call_names(item))
+
+            # 4. Module-level if/try blocks (including TryStar for Python 3.11+)
+            elif (
+                isinstance(node, ast.If)
+                or isinstance(node, ast.Try)
+                or (
+                    hasattr(ast, "TryStar")
+                    and isinstance(node, getattr(ast, "TryStar"))
+                )
+            ):
+                # Calls in the test condition
+                if isinstance(node, ast.If) and node.test:
+                    names.update(_extract_call_names(node.test))
+                # Walk body for assignments/calls at module scope
+                body_nodes: list[ast.stmt] = list(getattr(node, "body", [])) + list(
+                    getattr(node, "orelse", [])
+                )
+                if isinstance(node, ast.Try) or (
+                    hasattr(ast, "TryStar")
+                    and isinstance(node, getattr(ast, "TryStar"))
+                ):
+                    # Unwrap ExceptHandler bodies (handlers are not stmts)
+                    for handler in getattr(node, "handlers", []):
+                        body_nodes.extend(getattr(handler, "body", []))
+                    body_nodes.extend(getattr(node, "finalbody", []))
+                for sub in body_nodes:
+                    if isinstance(sub, (ast.Assign, ast.AnnAssign)):
+                        value = getattr(sub, "value", None)
+                        if value is not None:
+                            names.update(_extract_call_names(value))
+                    elif isinstance(sub, ast.Expr):
+                        names.update(_extract_call_names(sub))
+
+    # Filter out common builtins/stdlib that are never user-defined stubs
+    builtins_to_ignore = {
+        "print",
+        "len",
+        "str",
+        "int",
+        "float",
+        "bool",
+        "list",
+        "dict",
+        "tuple",
+        "set",
+        "type",
+        "super",
+        "isinstance",
+        "issubclass",
+        "getattr",
+        "setattr",
+        "hasattr",
+        "property",
+        "classmethod",
+        "staticmethod",
+        "abstractmethod",
+        "overload",
+        "dataclass",
+        "range",
+        "enumerate",
+        "zip",
+        "map",
+        "filter",
+        "sorted",
+        "reversed",
+        "min",
+        "max",
+        "sum",
+        "any",
+        "all",
+        "vars",
+        "dir",
+        "id",
+        "hash",
+        "repr",
+        "format",
+        "open",
+        "object",
+        "Exception",
+    }
+    names -= builtins_to_ignore
+
+    return names
+
+
 def is_docstring(node: ast.stmt) -> bool:
     """Check if an AST statement is a docstring (string expression)."""
     return isinstance(node, ast.Expr) and isinstance(
@@ -199,6 +376,7 @@ class StubTransformer:
         *,
         keep_docstrings: bool = True,
         removal_mode: str = "all",
+        import_time_names: set[str] | None = None,
     ) -> None:
         if removal_mode not in self.VALID_MODES:
             raise ValueError(
@@ -207,8 +385,10 @@ class StubTransformer:
             )
         self.keep_docstrings = keep_docstrings
         self.removal_mode = removal_mode
+        self.import_time_names = import_time_names or set()
         self.stub_count = 0
         self.removed_count = 0
+        self.preserved_count = 0
 
     def transform_source(self, source: str, filename: str = "<unknown>") -> str | None:
         """Transform a Python source string, returning stubbed version.
@@ -277,6 +457,9 @@ class StubTransformer:
                 continue
             if isinstance(node, ast.FunctionDef) and is_pure_assignment_init(node):
                 continue
+            if node.name in self.import_time_names:
+                self.preserved_count += 1
+                continue
 
             has_doc = bool(node.body and is_docstring(node.body[0]))
 
@@ -338,6 +521,8 @@ class StubTransformer:
             if is_dunder_method(node):
                 continue
             if isinstance(node, ast.FunctionDef) and is_pure_assignment_init(node):
+                continue
+            if node.name in self.import_time_names:
                 continue
 
             has_doc = bool(node.body and is_docstring(node.body[0]))
@@ -442,38 +627,37 @@ def stub_file(
     keep_docstrings: bool = True,
     removal_mode: str = "all",
     dry_run: bool = False,
-) -> tuple[bool, int, int]:
+    import_time_names: set[str] | None = None,
+) -> tuple[bool, int, int, int]:
     """Stub a single Python file.
 
-    Returns (was_modified, stub_count, removed_count).
+    Returns (was_modified, stub_count, removed_count, preserved_count).
     """
     try:
         source = source_path.read_text(encoding="utf-8")
     except (UnicodeDecodeError, PermissionError) as e:
         logger.warning("Cannot read %s: %s — skipping", source_path, e)
-        return False, 0, 0
+        return False, 0, 0, 0
 
     transformer = StubTransformer(
         keep_docstrings=keep_docstrings,
         removal_mode=removal_mode,
+        import_time_names=import_time_names,
     )
     result = transformer.transform_source(source, str(source_path))
 
     if result is None:
-        # Syntax error — copy as-is
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, output_path)
-        return False, 0, 0
+        return False, 0, 0, 0
 
     if result == source:
-        # No functions to stub — copy as-is
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             output_path.write_text(result, encoding="utf-8")
-        return False, 0, 0
+        return False, 0, 0, transformer.preserved_count
 
-    # Verify the result is valid Python
     try:
         ast.parse(result, str(output_path))
     except SyntaxError as e:
@@ -485,13 +669,18 @@ def stub_file(
         if not dry_run:
             output_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, output_path)
-        return False, 0, 0
+        return False, 0, 0, 0
 
     if not dry_run:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(result, encoding="utf-8")
 
-    return True, transformer.stub_count, transformer.removed_count
+    return (
+        True,
+        transformer.stub_count,
+        transformer.removed_count,
+        transformer.preserved_count,
+    )
 
 
 def stub_directory(
@@ -507,6 +696,14 @@ def stub_directory(
 
     Returns summary stats.
     """
+    import_time_names = collect_import_time_names(source_dir)
+    if import_time_names and verbose:
+        logger.info(
+            "  [SAFE] Preserving %d import-time functions: %s",
+            len(import_time_names),
+            ", ".join(sorted(import_time_names)[:20]),
+        )
+
     stats = {
         "files_processed": 0,
         "files_modified": 0,
@@ -514,6 +711,7 @@ def stub_directory(
         "files_copied": 0,
         "total_stubs": 0,
         "total_removed": 0,
+        "total_preserved": 0,
         "test_files_skipped": 0,
         "errors": 0,
     }
@@ -546,18 +744,20 @@ def stub_directory(
         stats["files_processed"] += 1
 
         out_path = output_dir / rel_path
-        modified, count, removed = stub_file(
+        modified, count, removed, preserved = stub_file(
             py_file,
             out_path,
             keep_docstrings=keep_docstrings,
             removal_mode=removal_mode,
             dry_run=dry_run,
+            import_time_names=import_time_names,
         )
 
         if modified:
             stats["files_modified"] += 1
             stats["total_stubs"] += count
             stats["total_removed"] += removed
+            stats["total_preserved"] += preserved
             if verbose:
                 msg = f"  [STUB] {rel_path} — {count} stubbed"
                 if removed:
@@ -565,6 +765,7 @@ def stub_directory(
                 logger.info(msg)
         else:
             stats["files_copied"] += 1
+            stats["total_preserved"] += preserved
             if verbose:
                 logger.info("  [COPY] %s — no functions to stub", rel_path)
 
@@ -618,6 +819,8 @@ def print_summary(stats: dict, output_dir: Path) -> None:
     print(f"  Files copied (no fn): {stats['files_copied']}")
     print(f"  Test files skipped:   {stats['test_files_skipped']}")
     print(f"  Total stubs created:  {stats['total_stubs']}")
+    if stats.get("total_preserved"):
+        print(f"  Import-safe preserved:{stats['total_preserved']}")
     if stats.get("total_removed"):
         print(f"  Functions removed:    {stats['total_removed']}")
     if stats["errors"]:

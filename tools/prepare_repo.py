@@ -49,7 +49,7 @@ DEFAULT_ORG = "Ethara-Ai"
 # Import stub module
 TOOLS_DIR = Path(__file__).parent
 sys.path.insert(0, str(TOOLS_DIR.parent))
-from tools.stub import StubTransformer, is_test_file
+from tools.stub import StubTransformer, is_test_file, collect_import_time_names
 
 # Lazy import for spec scraping (optional dependency)
 _scrape_spec_sync = None
@@ -234,7 +234,18 @@ def create_stubbed_branch(
         stub_target.relative_to(repo_dir),
         removal_mode,
     )
-    stubber = StubTransformer(keep_docstrings=True, removal_mode=removal_mode)
+    import_time_names = collect_import_time_names(stub_target)
+    if import_time_names:
+        logger.info(
+            "  Preserving %d import-time functions: %s",
+            len(import_time_names),
+            ", ".join(sorted(import_time_names)[:15]),
+        )
+    stubber = StubTransformer(
+        keep_docstrings=True,
+        removal_mode=removal_mode,
+        import_time_names=import_time_names,
+    )
 
     stubbed_count = 0
     removed_count = 0
