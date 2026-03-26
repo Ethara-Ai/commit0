@@ -24,7 +24,11 @@ config = """repos:
     - id: ruff
       args: [ --fix ]
     - id: ruff-format
-"""
+
+- repo: https://github.com/RobertCraigie/pyright-python
+  rev: v1.1.376
+  hooks:
+    - id: pyright"""
 
 
 def main(
