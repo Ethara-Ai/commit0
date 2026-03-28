@@ -22,6 +22,30 @@ BEDROCK_REGION_MODEL_PRICING = {
         "supports_system_messages": True,
         "supports_vision": True,
     },
+    "zai.glm-5": {
+        "input_cost_per_token": 1e-06,
+        "output_cost_per_token": 3.2e-06,
+        "max_input_tokens": 200000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_vision": False,
+    },
+    "minimax.minimax-m2.5": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "litellm_provider": "bedrock",
+        "supports_function_calling": True,
+        "supports_system_messages": True,
+        "supports_vision": False,
+    },
 }
 
 

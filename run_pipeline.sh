@@ -9,6 +9,8 @@
 # Examples:
 #     bash run_pipeline.sh --model opus --dataset minitorch
 #     bash run_pipeline.sh --model kimi --dataset starlette
+#     bash run_pipeline.sh --model glm5 --dataset starlette
+#     bash run_pipeline.sh --model minimax --dataset minitorch
 #     bash run_pipeline.sh --model gpt54 --dataset minitorch --branch my-branch
 #     bash run_pipeline.sh --model "bedrock/some-arn" --dataset ./custom_dataset.json --repo-split myrepo
 #     nohup bash run_pipeline.sh --model kimi --dataset minitorch > logs/kimi_minitorch.log 2>&1 &
@@ -52,6 +54,8 @@ Required:
 Model presets:
   opus     Bedrock Claude Opus 4.6
   kimi     Bedrock Kimi K2.5
+  glm5     Bedrock GLM 5
+  minimax  Bedrock MiniMax M2.5
   gpt54    OpenAI GPT-5.4
 
 Dataset examples:
@@ -117,6 +121,16 @@ resolve_model() {
         kimi)
             MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx"
             MODEL_SHORT="kimi-k2.5"
+            CACHE_PROMPTS="false"
+            ;;
+        glm5)
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/zhgjxd0sx776"
+            MODEL_SHORT="glm-5"
+            CACHE_PROMPTS="false"
+            ;;
+        minimax)
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/bbb8d58q374o"
+            MODEL_SHORT="minimax-m2.5"
             CACHE_PROMPTS="false"
             ;;
         gpt54)
