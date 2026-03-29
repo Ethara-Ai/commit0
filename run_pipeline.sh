@@ -42,6 +42,9 @@ BRANCH_OVERRIDE=""
 REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=7200
 EVAL_TIMEOUT=3600
+NO_STAGE3_LINT="false"
+INACTIVITY_TIMEOUT=900
+SKIP_TO_STAGE=""
 
 print_usage() {
     cat <<'USAGE'
@@ -67,9 +70,12 @@ Options:
   --branch         <name>    Override auto-generated branch name
   --repo-split     <name>    Override repo_split (required for custom dataset paths)
   --max-iteration  <n>       Max agent iterations per stage (default: 3)
-  --stage-timeout  <secs>    Stage timeout in seconds (default: 7200)
+  --stage-timeout  <secs>    Hard stage timeout in seconds (default: 7200, 0=disable)
+  --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
+  --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
+  --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
   -h, --help                 Show this help
 USAGE
     exit 1
@@ -85,6 +91,9 @@ while [[ $# -gt 0 ]]; do
         --stage-timeout) [[ $# -lt 2 ]] && { echo "Error: --stage-timeout requires a value"; exit 1; }; STAGE_TIMEOUT="$2";     shift 2 ;;
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
+        --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
+        --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -256,9 +265,15 @@ resolve_dataset "$DATASET_ARG"
 
 # Build the branch name: aider-<model_short>-<dataset_short>
 BRANCH_NAME="${BRANCH_OVERRIDE:-aider-${MODEL_SHORT}-${DATASET_SHORT}}"
+if [[ -z "$BRANCH_OVERRIDE" ]] && [[ "$NO_STAGE3_LINT" == "true" ]]; then
+    BRANCH_NAME="${BRANCH_NAME}-nolint-s3"
+fi
 
 # Paths that incorporate model+dataset for isolation
 RUN_ID=$(echo "${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+if [[ "$NO_STAGE3_LINT" == "true" ]]; then
+    RUN_ID="${RUN_ID}_nolint-s3"
+fi
 LOG_BASE="${BASE_DIR}/logs/agent/${RUN_ID}"
 PIPELINE_LOG="${BASE_DIR}/logs/pipeline_${RUN_ID}_results.json"
 
@@ -273,6 +288,7 @@ AGENT_CONFIG="${BASE_DIR}/.agent_${RUN_ID}.yaml"
 preflight() {
     local errors=0
 
+    # timeout is used for eval and API probe (not for agent runs — watchdog handles those)
     for cmd in jq bc timeout; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
@@ -446,6 +462,28 @@ PYEOF
 ts() { date "+%Y-%m-%d %H:%M:%S"; }
 log() { echo "[$(ts)] [${RUN_ID}] $1"; }
 
+get_mtime() {
+    stat -f '%m' "$1" 2>/dev/null \
+        || stat -c '%Y' "$1" 2>/dev/null \
+        || "$VENV_PYTHON" -c "import os; print(int(os.path.getmtime('$1')))" 2>/dev/null \
+        || echo "0"
+}
+
+get_newest_aider_log() {
+    local search_dir="$1"
+    local newest=""
+    local newest_mtime=0
+    while IFS= read -r logfile; do
+        local mt
+        mt=$(get_mtime "$logfile")
+        if [[ "$mt" -gt "$newest_mtime" ]]; then
+            newest_mtime="$mt"
+            newest="$logfile"
+        fi
+    done < <(find "$search_dir" -name "aider.log" 2>/dev/null)
+    echo "$newest"
+}
+
 # ============================================================
 # Config Writers
 # ============================================================
@@ -466,6 +504,12 @@ EOF
     log "  Wrote commit0 config: ${COMMIT0_CONFIG}"
 }
 
+yaml_escape() {
+    local val="$1"
+    val="${val//\'/\'\'}"
+    echo "'${val}'"
+}
+
 write_agent_config() {
     local run_tests="$1"
     local use_lint_info="$2"
@@ -477,7 +521,7 @@ write_agent_config() {
 agent_name: aider
 YAMLEOF
     cat >> "$AGENT_CONFIG" <<EOF
-model_name: "${MODEL_NAME}"
+model_name: $(yaml_escape "${MODEL_NAME}")
 use_user_prompt: false
 user_prompt: 'Here is your task:
 
@@ -515,74 +559,121 @@ EOF
 # Run Agent
 # ============================================================
 
+AGENT_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
-MAX_STAGE_RETRIES=3
+
+# Return code contract for watchdog_run:
+#   0       = agent exited successfully
+#   124     = watchdog killed agent (inactivity or hard timeout)
+#   128+N   = agent killed by signal N
+#   other   = agent error (non-zero exit)
+#   NOTE: wait returns 127 when PID is already reaped; treated as 0 (success)
+watchdog_run() {
+    local agent_pid="$1"
+    local log_dir="$2"
+    local inactivity_limit="$3"
+    local hard_timeout="$4"
+    local start_time
+    start_time=$(date +%s)
+
+    while kill -0 "$agent_pid" 2>/dev/null; do
+        sleep 15
+
+        if [[ "$hard_timeout" -gt 0 ]]; then
+            local now
+            now=$(date +%s)
+            local elapsed=$(( now - start_time ))
+            if [[ $elapsed -ge $hard_timeout ]]; then
+                log "  WATCHDOG: Hard timeout ${hard_timeout}s reached. Killing agent."
+                kill "$agent_pid" 2>/dev/null || true
+                sleep 2
+                kill -9 "$agent_pid" 2>/dev/null || true
+                wait "$agent_pid" 2>/dev/null || true
+                return 124
+            fi
+        fi
+
+        local latest_log
+        latest_log=$(get_newest_aider_log "$log_dir")
+
+        if [[ -n "$latest_log" ]] && [[ -f "$latest_log" ]]; then
+            local file_mtime
+            file_mtime=$(get_mtime "$latest_log")
+            local now_epoch
+            now_epoch=$(date +%s)
+            local idle=$(( now_epoch - file_mtime ))
+
+            if [[ $idle -ge $inactivity_limit ]]; then
+                log "  WATCHDOG: No log activity for ${idle}s (limit: ${inactivity_limit}s). Agent appears stuck."
+                log "  WATCHDOG: Last active log: $(basename "$(dirname "$latest_log")")"
+                log "  WATCHDOG: Killing agent (PID ${agent_pid})."
+                kill "$agent_pid" 2>/dev/null || true
+                sleep 2
+                kill -9 "$agent_pid" 2>/dev/null || true
+                wait "$agent_pid" 2>/dev/null || true
+                return 124
+            fi
+        fi
+    done
+
+    wait "$agent_pid" 2>/dev/null
+    local rc=$?
+    if [[ $rc -eq 127 ]]; then
+        rc=0
+    fi
+    return $rc
+}
 
 run_agent() {
     local branch="$1"
     local override="$2"
     local log_dir="$3"
 
-    local attempt=0
-    local current_timeout="$STAGE_TIMEOUT"
-    local total_elapsed=0
+    local cmd=(
+        "$VENV_PYTHON" -m agent run "$branch"
+        --backend "$BACKEND"
+        --agent-config-file "$AGENT_CONFIG"
+        --commit0-config-file "$COMMIT0_CONFIG"
+        --log-dir "$log_dir"
+        --max-parallel-repos 1
+    )
 
-    while [[ $attempt -lt $MAX_STAGE_RETRIES ]]; do
-        attempt=$((attempt + 1))
+    if [[ "$override" == "true" ]]; then
+        cmd+=(--override-previous-changes)
+    fi
+    cmd+=(--no-show-rich-progress)
 
-        local cmd=(
-            "$VENV_PYTHON" -m agent run "$branch"
-            --backend "$BACKEND"
-            --agent-config-file "$AGENT_CONFIG"
-            --commit0-config-file "$COMMIT0_CONFIG"
-            --log-dir "$log_dir"
-            --max-parallel-repos 1
-        )
+    local agent_log="${log_dir}/agent_run.log"
+    log "  Running agent (watchdog: inactivity=${INACTIVITY_TIMEOUT}s, hard=${STAGE_TIMEOUT}s)"
+    log "  Command: ${cmd[*]}"
+    log "  Output → ${agent_log}"
 
-        if [[ "$override" == "true" ]] && [[ $attempt -eq 1 ]]; then
-            cmd+=(--override-previous-changes)
-        fi
-        cmd+=(--no-show-rich-progress)
+    local start_time
+    start_time=$(date +%s)
 
-        local agent_log="${log_dir}/agent_run.log"
-        log "  [Attempt ${attempt}/${MAX_STAGE_RETRIES}] timeout=${current_timeout}s"
-        log "  Running: ${cmd[*]}"
-        log "  Output → ${agent_log}"
+    set +e
+    "${cmd[@]}" >>"$agent_log" 2>&1 &
+    local agent_pid=$!
+    AGENT_PID=$agent_pid
 
-        local start_time
-        start_time=$(date +%s)
+    watchdog_run "$agent_pid" "$log_dir" "$INACTIVITY_TIMEOUT" "$STAGE_TIMEOUT"
+    AGENT_RC=$?
+    AGENT_PID=""
+    set -e
 
-        set +e
-        timeout "$current_timeout" "${cmd[@]}" >>"$agent_log" 2>&1
-        AGENT_RC=$?
-        set -e
+    local end_time
+    end_time=$(date +%s)
+    AGENT_ELAPSED=$(( end_time - start_time ))
 
-        local end_time
-        end_time=$(date +%s)
-        local this_elapsed=$(( end_time - start_time ))
-        total_elapsed=$(( total_elapsed + this_elapsed ))
-
-        if [[ $AGENT_RC -eq 124 ]]; then
-            log "  Agent TIMED OUT (attempt ${attempt}) after ${this_elapsed}s"
-            if [[ $attempt -lt $MAX_STAGE_RETRIES ]]; then
-                current_timeout=$(( current_timeout * 2 ))
-                log "  Retrying with timeout=${current_timeout}s (exponential backoff)..."
-                log "  Committed work is preserved — agent will resume from where it left off"
-            else
-                log "  All ${MAX_STAGE_RETRIES} attempts exhausted. Proceeding with partial results."
-            fi
-        elif [[ $AGENT_RC -ne 0 ]]; then
-            log "  Agent FAILED (rc=${AGENT_RC}) in ${this_elapsed}s — last 20 lines:"
-            tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
-            break
-        else
-            log "  Agent finished in ${this_elapsed}s (attempt ${attempt}), returncode=${AGENT_RC}"
-            break
-        fi
-    done
-
-    AGENT_ELAPSED="$total_elapsed"
+    if [[ $AGENT_RC -eq 124 ]]; then
+        log "  Agent killed by watchdog after ${AGENT_ELAPSED}s"
+    elif [[ $AGENT_RC -ne 0 ]]; then
+        log "  Agent FAILED (rc=${AGENT_RC}) in ${AGENT_ELAPSED}s — last 20 lines:"
+        tail -20 "$agent_log" | while IFS= read -r line; do log "    | $line"; done
+    else
+        log "  Agent finished in ${AGENT_ELAPSED}s, returncode=${AGENT_RC}"
+    fi
 }
 
 # ============================================================
@@ -809,7 +900,7 @@ stage_1_draft() {
     local rc="$AGENT_RC"
 
     local cost
-    cost=$(extract_all_stage_costs "$stage_log_dir")
+    cost=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 1 cost extraction failed"; return 1; }
     log "  Stage 1 cost: \$${cost}"
 
     run_evaluate "$BRANCH_NAME" "stage1"
@@ -857,11 +948,11 @@ stage_2_lint_refine() {
     local rc="$AGENT_RC"
 
     local s1_cost
-    s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0')
+    s1_cost=$(echo "$RESULTS_JSON" | jq -r '.stage1.cost_usd // 0') || { log "ERROR: Stage 2 failed to read stage1 cost"; return 1; }
     local s2_incremental
-    s2_incremental=$(extract_all_stage_costs "$stage_log_dir")
+    s2_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 2 cost extraction failed"; return 1; }
     local total_cost
-    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc)
+    total_cost=$(echo "scale=4; $s1_cost + $s2_incremental" | bc) || { log "ERROR: Stage 2 cost calculation failed"; return 1; }
 
     log "  Stage 2 incremental cost: \$${s2_incremental} (cumulative: \$${total_cost})"
 
@@ -902,7 +993,13 @@ stage_3_test_refine() {
     log "STAGE 3: Refine with Unit Test Feedback"
     log "======================================================================"
 
-    write_agent_config "true" "true" "false" "false" "false"
+    local s3_lint="true"
+    if [[ "$NO_STAGE3_LINT" == "true" ]]; then
+        s3_lint="false"
+        log "  Stage 3 lint DISABLED (--no-stage3-lint)"
+    fi
+
+    write_agent_config "true" "$s3_lint" "false" "false" "false"
 
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
@@ -912,11 +1009,11 @@ stage_3_test_refine() {
     local rc="$AGENT_RC"
 
     local s2_cumulative
-    s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0')
+    s2_cumulative=$(echo "$RESULTS_JSON" | jq -r '.stage2.cost_usd_cumulative // 0') || { log "ERROR: Stage 3 failed to read stage2 cost"; return 1; }
     local s3_incremental
-    s3_incremental=$(extract_all_stage_costs "$stage_log_dir")
+    s3_incremental=$(extract_all_stage_costs "$stage_log_dir") || { log "ERROR: Stage 3 cost extraction failed"; return 1; }
     local total_cost
-    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc)
+    total_cost=$(echo "scale=4; $s2_cumulative + $s3_incremental" | bc) || { log "ERROR: Stage 3 cost calculation failed"; return 1; }
 
     log "  Stage 3 incremental cost: \$${s3_incremental} (cumulative: \$${total_cost})"
 
@@ -1011,6 +1108,12 @@ print_summary_table() {
 PIPELINE_SUCCESS="false"
 
 cleanup() {
+    if [[ -n "$AGENT_PID" ]] && kill -0 "$AGENT_PID" 2>/dev/null; then
+        kill -- -"$AGENT_PID" 2>/dev/null || true
+        sleep 2
+        kill -9 -- -"$AGENT_PID" 2>/dev/null || true
+    fi
+
     if [[ "$PIPELINE_SUCCESS" == "true" ]]; then
         rm -f "$COMMIT0_CONFIG" "$AGENT_CONFIG" 2>/dev/null || true
         log "Cleaned up per-run config files"
@@ -1023,6 +1126,7 @@ cleanup() {
     fi
 }
 trap cleanup EXIT
+trap 'exit' INT TERM
 
 # ============================================================
 # Main
@@ -1038,7 +1142,16 @@ main() {
     log "Backend:      ${BACKEND}"
     log "Cache:        ${CACHE_PROMPTS}"
     log "Max Iter:     ${MAX_ITERATION}"
-    log "Stage Timeout: ${STAGE_TIMEOUT}s | Eval Timeout: ${EVAL_TIMEOUT}s"
+    log "Stage Timeout: ${STAGE_TIMEOUT}s (0=disabled) | Eval Timeout: ${EVAL_TIMEOUT}s"
+    log "Inactivity:   ${INACTIVITY_TIMEOUT}s (watchdog kills stuck agents)"
+    if [[ "$NO_STAGE3_LINT" == "true" ]]; then
+        log "Stage3 Lint:  DISABLED (--no-stage3-lint)"
+    else
+        log "Stage3 Lint:  enabled"
+    fi
+    if [[ -n "$SKIP_TO_STAGE" ]]; then
+        log "Skip To:      Stage ${SKIP_TO_STAGE} (prior stages skipped)"
+    fi
     log "Logs:         ${LOG_BASE}"
     log "Results:      ${PIPELINE_LOG}"
     log "Start time:   $(ts)"
@@ -1048,20 +1161,62 @@ main() {
 
     write_commit0_config
 
-    init_results
+    if [[ -n "$SKIP_TO_STAGE" ]]; then
+        if [[ ! -f "$PIPELINE_LOG" ]]; then
+            log "ERROR: Cannot skip to stage ${SKIP_TO_STAGE}: no prior results found at ${PIPELINE_LOG}"
+            log "  Run a full pipeline first, then use --skip-to-stage."
+            exit 1
+        fi
+        RESULTS_JSON=$(cat "$PIPELINE_LOG")
+        local loaded_ok="true"
+        if [[ "$SKIP_TO_STAGE" == "2" ]]; then
+            echo "$RESULTS_JSON" | jq -e '.stage1' >/dev/null 2>&1 || loaded_ok="false"
+            if [[ "$loaded_ok" == "false" ]]; then
+                log "ERROR: Prior results missing stage1 data. Cannot skip to stage 2."
+                exit 1
+            fi
+        elif [[ "$SKIP_TO_STAGE" == "3" ]]; then
+            echo "$RESULTS_JSON" | jq -e '.stage1' >/dev/null 2>&1 || loaded_ok="false"
+            echo "$RESULTS_JSON" | jq -e '.stage2' >/dev/null 2>&1 || loaded_ok="false"
+            if [[ "$loaded_ok" == "false" ]]; then
+                log "ERROR: Prior results missing stage1/stage2 data. Cannot skip to stage 3."
+                exit 1
+            fi
+        fi
+        log "  Loaded prior results from: ${PIPELINE_LOG}"
+    else
+        init_results
+    fi
 
     local pipeline_error=""
 
-    if ! stage_1_draft; then
-        pipeline_error="Stage 1 failed"
-        log "PIPELINE ERROR: ${pipeline_error}"
+    local skip_stage_1="false"
+    local skip_stage_2="false"
+    if [[ "$SKIP_TO_STAGE" == "2" ]]; then
+        skip_stage_1="true"
+        log "Skipping Stage 1 (--skip-to-stage 2)"
+    elif [[ "$SKIP_TO_STAGE" == "3" ]]; then
+        skip_stage_1="true"
+        skip_stage_2="true"
+        log "Skipping Stage 1 and 2 (--skip-to-stage 3)"
     fi
 
-    if [[ -z "$pipeline_error" ]]; then
+    if [[ "$skip_stage_1" == "false" ]]; then
+        if ! stage_1_draft; then
+            pipeline_error="Stage 1 failed"
+            log "PIPELINE ERROR: ${pipeline_error}"
+        fi
+    else
+        log "Stage 1: SKIPPED"
+    fi
+
+    if [[ -z "$pipeline_error" ]] && [[ "$skip_stage_2" == "false" ]]; then
         if ! stage_2_lint_refine; then
             pipeline_error="Stage 2 failed"
             log "PIPELINE ERROR: ${pipeline_error}"
         fi
+    elif [[ "$skip_stage_2" == "true" ]]; then
+        log "Stage 2: SKIPPED"
     fi
 
     if [[ -z "$pipeline_error" ]]; then

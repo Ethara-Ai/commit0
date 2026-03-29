@@ -26,6 +26,25 @@ from commit0.cli import read_commit0_config_file
 from pathlib import Path
 from datetime import datetime
 from agent.run_agent import DirContext, run_eval_after_each_commit
+import logging
+
+logger = logging.getLogger(__name__)
+
+
+def _is_module_done(log_dir: Path) -> bool:
+    return (log_dir / ".done").exists()
+
+
+def _mark_module_done(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / ".done").touch()
+
+
+def _get_stable_log_dir(log_dir: str, repo_name: str, branch: str) -> Path:
+    """Return a stable experiment log directory that persists across retries."""
+    stable_dir = Path(log_dir) / repo_name / branch / "current"
+    stable_dir.mkdir(parents=True, exist_ok=True)
+    return stable_dir
 
 
 def run_agent_for_repo(
@@ -108,14 +127,8 @@ def run_agent_for_repo(
         list(set([i.split(":")[0] for i in test_files_str if i.strip()]))
     )
 
-    # prepare the log dir
-    experiment_log_dir = (
-        Path(log_dir)
-        / repo_name
-        / branch
-        / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    )
-    experiment_log_dir.mkdir(parents=True, exist_ok=True)
+    # prepare the log dir — stable across retries (no timestamp)
+    experiment_log_dir = _get_stable_log_dir(log_dir, repo_name, branch)
     eval_results = {}
 
     # write agent_config to .agent.yaml in the log_dir for record
@@ -128,17 +141,22 @@ def run_agent_for_repo(
             raise ValueError("Invalid input")
 
         if agent_config.run_tests:
-            # when unit test feedback is available, iterate over test files
             for test_file in test_files:
-                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 test_file_name = test_file.replace(".py", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / test_file_name
+
+                if _is_module_done(test_log_dir):
+                    logger.info(
+                        f"Skipping already-completed test module: {test_file_name}"
+                    )
+                    continue
+
+                test_cmd = f"{sys.executable} -m commit0 test {repo_path} {test_file} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
                 message = get_message(agent_config, repo_path, test_files=[test_file])
 
-                # display the test file to terminal
                 _ = agent.run(
                     "",
                     test_cmd,
@@ -147,21 +165,26 @@ def run_agent_for_repo(
                     test_log_dir,
                     test_first=True,
                 )
+                _mark_module_done(test_log_dir)
+
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
                         branch, backend, commit0_config_file
                     )
         elif agent_config.run_entire_dir_lint:
-            # when unit test feedback is available, iterate over test files
             for lint_file in lint_files:
                 lint_file_name = lint_file.replace(".py", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / lint_file_name
+
+                if _is_module_done(lint_log_dir):
+                    logger.info(f"Skipping already-linted file: {lint_file_name}")
+                    continue
+
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
 
-                # display the test file to terminal
                 _ = agent.run(
                     "",
                     "",
@@ -170,25 +193,34 @@ def run_agent_for_repo(
                     lint_log_dir,
                     lint_first=True,
                 )
+                _mark_module_done(lint_log_dir)
+
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
                         branch, backend, commit0_config_file
                     )
         else:
-            # when unit test feedback is not available, iterate over target files to edit
             message = get_message(agent_config, repo_path, test_files=test_files)
 
             for f in target_edit_files:
+                file_name = f.replace(".py", "").replace("/", "__")
+                file_log_dir = experiment_log_dir / file_name
+
+                if _is_module_done(file_log_dir):
+                    logger.info(f"Skipping already-drafted file: {file_name}")
+                    continue
+
                 if agent_config.add_import_module_to_context:
                     dependencies = import_dependencies.get(f, [])
                     message = update_message_with_dependencies(message, dependencies)
-                file_name = f.replace(".py", "").replace("/", "__")
-                file_log_dir = experiment_log_dir / file_name
+
                 lint_cmd = get_lint_cmd(
                     repo_name, agent_config.use_lint_info, commit0_config_file
                 )
                 _ = agent.run(message, "", lint_cmd, [f], file_log_dir)
+                _mark_module_done(file_log_dir)
+
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
