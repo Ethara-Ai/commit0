@@ -14,8 +14,8 @@ BEDROCK_REGION_MODEL_PRICING = {
         "input_cost_per_token": 6e-07,
         "output_cost_per_token": 3e-06,
         "max_input_tokens": 262144,
-        "max_output_tokens": 262144,
-        "max_tokens": 262144,
+        "max_output_tokens": 16384,
+        "max_tokens": 16384,
         "mode": "chat",
         "litellm_provider": "bedrock",
         "supports_function_calling": True,
@@ -25,7 +25,7 @@ BEDROCK_REGION_MODEL_PRICING = {
     "zai.glm-5": {
         "input_cost_per_token": 1.2e-06,
         "output_cost_per_token": 3.84e-06,
-        "max_input_tokens": 200000,
+        "max_input_tokens": 202752,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
         "mode": "chat",
@@ -37,7 +37,7 @@ BEDROCK_REGION_MODEL_PRICING = {
     "minimax.minimax-m2.5": {
         "input_cost_per_token": 3.6e-07,
         "output_cost_per_token": 1.44e-06,
-        "max_input_tokens": 1000000,
+        "max_input_tokens": 196608,
         "max_output_tokens": 8192,
         "max_tokens": 8192,
         "mode": "chat",
@@ -254,6 +254,20 @@ class AiderAgents(Agents):
         elif lint_first:
             coder.commands.cmd_lint(fnames=fnames)
         else:
+            max_input = self.model.info.get("max_input_tokens", 0)
+            if max_input > 0:
+                estimated_tokens = len(message) // 4
+                if estimated_tokens > max_input:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Skipping: message ~{estimated_tokens} tokens exceeds "
+                        f"max_input_tokens {max_input} for {fnames}"
+                    )
+                    sys.stdout.close()
+                    sys.stderr.close()
+                    sys.stdout = sys.__stdout__
+                    sys.stderr = sys.__stderr__
+                    return AiderReturn(log_file)
             coder.run(message)
 
         # Close redirected stdout and stderr
