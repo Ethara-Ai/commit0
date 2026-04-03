@@ -248,19 +248,20 @@ def run_commit0_setup(dataset_path: Path) -> bool:
         "all",
         "--dataset-name",
         str(dataset_path),
+        "--dataset-split",
+        "train",
     ]
     result = _run(cmd, cwd=PROJECT_ROOT, timeout=600)
     return result.returncode == 0
 
 
 def run_commit0_build(dataset_path: Path) -> bool:
+    """Build Docker images. Reads dataset from .commit0.yaml written by setup."""
     cmd = [
         sys.executable,
         "-m",
         "commit0",
         "build",
-        "--dataset-name",
-        str(dataset_path),
     ]
     result = _run(cmd, cwd=PROJECT_ROOT, timeout=1800)
     return result.returncode == 0

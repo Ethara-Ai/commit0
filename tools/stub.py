@@ -169,6 +169,10 @@ def collect_import_time_names(source_dir: Path) -> set[str]:
                         for dec in item.decorator_list:
                             if isinstance(dec, ast.Call):
                                 names.update(_extract_call_names(dec))
+                        # __init_subclass__ runs at class definition time
+                        # for every subclass — preserve functions it calls
+                        if item.name == "__init_subclass__":
+                            names.update(_extract_call_names(item))
 
                     elif isinstance(item, ast.Expr):
                         names.update(_extract_call_names(item))

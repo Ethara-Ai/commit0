@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Union, cast, Optional
@@ -13,6 +14,8 @@ from commit0.harness.dockerfiles import (
     get_dockerfile_base,
     get_dockerfile_repo,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -161,12 +164,20 @@ class Commit0Spec(Spec):
             setup_commands.append(cmd)
 
         if "install" in specs and specs["install"] is not None:
-            if specs["install"].startswith("pip"):
-                install = "uv " + specs["install"]
+            install_cmd = specs["install"]
+            if install_cmd.startswith("pip"):
+                install = "uv " + install_cmd
+            elif install_cmd.startswith("uv "):
+                install = install_cmd
+            elif install_cmd.startswith("python "):
+                install = "uv run " + install_cmd
             else:
-                raise ValueError(
-                    f"install command should always start with pip, but you have {specs['install']}"
+                logger.warning(
+                    "Non-standard install command for %s: %s — passing through as-is",
+                    repo,
+                    install_cmd,
                 )
+                install = install_cmd
             setup_commands.append(install)
         setup_commands.append(
             "uv pip install -U pytest pytest-cov coverage pytest-json-report"
