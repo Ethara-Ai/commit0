@@ -65,6 +65,65 @@ def _safe_builder_args() -> list[str]:
     return []  # current builder is fine
 
 
+MULTIARCH_BUILDER_NAME = "commit0-multiarch"
+
+
+def _multiarch_builder_args() -> list[str]:
+    """Return ``['--builder', name]`` for a builder that supports multi-platform builds.
+
+    Multi-arch OCI exports require the ``docker-container`` driver.  This
+    function checks for an existing builder, falls back to the current default
+    if it already uses that driver, and finally creates a new builder if
+    needed.
+    """
+    # 1. Check if our dedicated builder already exists
+    try:
+        probe = subprocess.run(
+            ["docker", "buildx", "inspect", MULTIARCH_BUILDER_NAME],
+            capture_output=True,
+            text=True,
+        )
+        if probe.returncode == 0 and "docker-container" in (
+            probe.stdout + probe.stderr
+        ):
+            return ["--builder", MULTIARCH_BUILDER_NAME]
+    except Exception:
+        pass
+
+    # 2. Check if the current default builder already uses docker-container
+    try:
+        result = subprocess.run(
+            ["docker", "buildx", "inspect"],
+            capture_output=True,
+            text=True,
+        )
+        if "docker-container" in (result.stdout + result.stderr):
+            return []  # current default is suitable
+    except Exception:
+        pass
+
+    # 3. Create a new docker-container builder
+    try:
+        subprocess.run(
+            [
+                "docker",
+                "buildx",
+                "create",
+                "--name",
+                MULTIARCH_BUILDER_NAME,
+                "--driver",
+                "docker-container",
+                "--bootstrap",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return ["--builder", MULTIARCH_BUILDER_NAME]
+    except Exception:
+        return []  # best-effort: let buildx figure it out
+
+
 PROXY_ENV_KEYS = [
     "http_proxy",
     "https_proxy",
@@ -206,18 +265,18 @@ def build_image(
             buildarg_flags.extend(["--build-arg", f"{k}={v}"])
 
         nocache_flags = ["--no-cache"] if nocache else []
-        builder_flags = _safe_builder_args()
 
         # Step 1: Build multi-arch OCI tarball for ECR push (non-fatal)
         oci_dir = OCI_IMAGE_DIR / image_name.replace(":", "__")
         oci_dir.mkdir(parents=True, exist_ok=True)
         oci_tar_path = oci_dir / f"{image_name.replace(':', '__')}.tar"
 
+        multiarch_flags = _multiarch_builder_args()
         oci_cmd = [
             "docker",
             "buildx",
             "build",
-            *builder_flags,
+            *multiarch_flags,
             "--platform",
             platform,
             "--tag",
@@ -242,11 +301,12 @@ def build_image(
 
         # Step 2: Load native-arch image into local daemon for immediate use
         native = _native_platform()
+        load_builder_flags = _safe_builder_args()
         load_cmd = [
             "docker",
             "buildx",
             "build",
-            *builder_flags,
+            *load_builder_flags,
             "--platform",
             native,
             "--tag",
@@ -293,6 +353,9 @@ def build_base_images(
     base_images = {
         x.base_image_key: (x.base_dockerfile, x.platform) for x in test_specs
     }
+
+    # Ensure multiarch builder exists before building base images
+    _multiarch_builder_args()
 
     for image_name, (dockerfile, platform) in base_images.items():
         try:
@@ -403,6 +466,9 @@ def build_repo_images(
         print("No repo images need to be built.")
         return [], []
     print(f"Total repo images to build: {len(configs_to_build)}")
+
+    # Pre-create multiarch builder in main thread to avoid race in worker threads
+    _multiarch_builder_args()
 
     successful, failed = list(), list()
     with tqdm(

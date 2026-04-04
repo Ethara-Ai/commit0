@@ -95,12 +95,8 @@ class Spec(ABC):
 
     @property
     def platform(self) -> str:
-        import platform as _platform
-
-        machine = _platform.machine().lower()
-        if machine in ("aarch64", "arm64"):
-            return "linux/arm64"
-        return "linux/amd64"
+        """Comma-separated platforms for multi-arch OCI tarball builds."""
+        return "linux/amd64,linux/arm64"
 
     @abstractmethod
     def make_repo_script_list(self) -> list[str]:
