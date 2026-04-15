@@ -3,6 +3,12 @@ from pathlib import Path
 from typing import Dict, ItemsView, KeysView
 from pydantic import BaseModel
 
+# Supported Python versions for per-version base Docker images
+SUPPORTED_PYTHON_VERSIONS = {"3.10", "3.12", "3.13"}
+
+# Path to the directory containing per-version Dockerfile templates
+DOCKERFILES_DIR = Path(__file__).parent / "dockerfiles"
+
 
 class RepoInstance(BaseModel):
     instance_id: str

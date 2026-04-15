@@ -48,7 +48,22 @@ class Spec(ABC):
 
     @property
     def base_image_key(self) -> str:
-        return "commit0.base:latest"
+        python_version = self._get_python_version()
+        return f"commit0.base.python{python_version}:latest"
+
+    def _get_python_version(self) -> str:
+        setup = self._get_setup_dict()
+        if "python" in setup:
+            return str(setup["python"])
+        return "3.12"
+
+    def _get_setup_dict(self) -> dict:
+        """Extract setup dict from instance regardless of whether it's a Pydantic model or plain dict."""
+        if isinstance(self.instance, dict) and "setup" in self.instance:
+            return self.instance["setup"] or {}
+        if isinstance(self.instance, RepoInstance):
+            return self.instance.setup or {}
+        return {}
 
     @property
     def repo_image_key(self) -> str:
@@ -88,11 +103,18 @@ class Spec(ABC):
 
     @property
     def base_dockerfile(self) -> str:
-        return get_dockerfile_base()
+        return get_dockerfile_base(self._get_python_version())
 
     @property
     def repo_dockerfile(self) -> str:
-        return get_dockerfile_repo()
+        specs = self._get_setup_dict()
+        return get_dockerfile_repo(
+            base_image=self.base_image_key,
+            pre_install=specs.get("pre_install"),
+            packages=specs.get("packages"),
+            pip_packages=specs.get("pip_packages"),
+            install_cmd=specs.get("install"),
+        )
 
     @property
     def platform(self) -> str:
@@ -116,77 +138,22 @@ class Commit0Spec(Spec):
     def make_repo_script_list(self) -> list[str]:
         """Create a list of bash commands to set up the repository for testing.
         This is the setup script for the instance image.
+        Dependencies are installed via Dockerfile layers (not setup.sh).
         """
-        specs = self.instance["setup"]
         repo = self.instance["repo"]
         env_setup_commit = self.instance["reference_commit"]
         base_commit = self.instance["base_commit"]
 
         setup_commands = [
-            # Use --depth 1 for shallow clone to prevent agents from accessing
-            # git history and exploiting it to retrieve original implementations
             f"git clone --depth 1 -o origin https://github.com/{repo} {self.repo_directory}",
-            f"chmod -R 777 {self.repo_directory}",  # So nonroot user can run tests
+            f"chmod -R 777 {self.repo_directory}",
             f"cd {self.repo_directory}",
-            # Fetch both commits needed: env_setup_commit for setup and base_commit for later reset
             f"git fetch --depth 1 origin {env_setup_commit} {base_commit}",
             f"git reset --hard {env_setup_commit}",
-            # Initialize git submodules (no-op for repos without submodules).
-            # Must run BEFORE removing origin — submodule URLs may be relative.
             "git submodule update --init --recursive 2>/dev/null || true",
-            # Remove the remote so the agent won't see newer commits.
             "git remote remove origin",
-            f"uv venv --python {specs['python']}",
-            "source .venv/bin/activate",
-            "which python",
+            f"git reset --hard {base_commit}",
         ]
-
-        # Run pre-install set up if provided
-        if "pre_install" in specs and specs["pre_install"] is not None:
-            for pre_install in specs["pre_install"]:
-                if "apt-get install" in pre_install and "-y" not in pre_install:
-                    pre_install = pre_install.replace(
-                        "apt-get install", "apt-get install -y --no-install-recommends"
-                    )
-                elif "apt install" in pre_install and "-y" not in pre_install:
-                    pre_install = pre_install.replace(
-                        "apt install", "apt install -y --no-install-recommends"
-                    )
-                setup_commands.append(pre_install)
-
-        # Install dependencies
-        if "packages" in specs and specs["packages"] is not None:
-            for package in specs["packages"]:
-                cmd = f"uv pip install -r {package}"
-                setup_commands.append(cmd)
-
-        # Install additional packages if specified
-        if "pip_packages" in specs and specs["pip_packages"] is not None:
-            pip_packages = [f'"{one}"' for one in specs["pip_packages"]]
-            pip_packages = " ".join(pip_packages)
-            cmd = f"uv pip install {pip_packages}"
-            setup_commands.append(cmd)
-
-        if "install" in specs and specs["install"] is not None:
-            install_cmd = specs["install"]
-            if install_cmd.startswith("pip"):
-                install = "uv " + install_cmd
-            elif install_cmd.startswith("uv "):
-                install = install_cmd
-            elif install_cmd.startswith("python "):
-                install = "uv run " + install_cmd
-            else:
-                logger.warning(
-                    "Non-standard install command for %s: %s — passing through as-is",
-                    repo,
-                    install_cmd,
-                )
-                install = install_cmd
-            setup_commands.append(install)
-        setup_commands.append(
-            "uv pip install -U pytest pytest-cov coverage pytest-json-report"
-        )
-        setup_commands.append(f"git reset --hard {base_commit}")
         return setup_commands
 
     def make_eval_script_list(self) -> list[str]:
@@ -194,7 +161,6 @@ class Commit0Spec(Spec):
         diff_path = "/patch.diff" if self.absolute else "../patch.diff"
         eval_script_list = [
             f"cd {self.repo_directory}",
-            "source .venv/bin/activate",
             f"git reset --hard {self.instance['base_commit']}",
             f"git apply --allow-empty -v {diff_path}",
             "git status",
@@ -211,9 +177,6 @@ class SimpleSpec(Spec):
         """
         setup_commands = [
             f"mkdir {self.repo_directory} && cd {self.repo_directory}",
-            "uv venv --python 3.12",
-            "source .venv/bin/activate",
-            "uv pip install -U pytest pytest-cov coverage pytest-json-report",
             "which python",
         ]
         return setup_commands
@@ -222,7 +185,6 @@ class SimpleSpec(Spec):
         """Run the tests."""
         eval_script_list = [
             f"cd {self.repo_directory}",
-            "source .venv/bin/activate",
             "cat /patch.diff > test.py",
             "pytest test.py > test_output.txt 2>&1",
             "echo $? > pytest_exit_code.txt",
@@ -234,72 +196,18 @@ class SWEBenchSpec(Spec):
     def make_repo_script_list(self) -> list[str]:
         """Create a list of bash commands to set up the repository for testing.
         This is the setup script for the instance image.
+        Dependencies are installed via Dockerfile layers (not setup.sh).
         """
-        specs = self.instance["setup"]
         repo = self.instance["repo"]
-        version = int(str(specs["python"]).split(".")[-1])
-        if version < 7:
-            specs["python"] = 3.7
-
+        specs = self.instance["setup"]
         base_commit = self.instance["base_commit"]
         setup_commands = [
-            # Use --depth 1 for shallow clone to prevent agents from accessing
-            # git history and exploiting it to retrieve original implementations
             f"git clone --depth 1 -o origin https://github.com/{repo} {self.repo_directory}",
-            f"chmod -R 777 {self.repo_directory}",  # So nonroot user can run tests
+            f"chmod -R 777 {self.repo_directory}",
             f"cd {self.repo_directory}",
-            # Fetch base_commit needed for eval script reset
             f"git fetch --depth 1 origin {base_commit}",
-            # Remove the remote so the agent won't see newer commits.
             "git remote remove origin",
-            f"uv venv --python {specs['python']}",
-            "source .venv/bin/activate",
-            "which python",
         ]
-
-        # Run pre-install set up if provided
-        if "pre_install" in specs and specs["pre_install"] is not None:
-            for pre_install in specs["pre_install"]:
-                if "apt-get install" in pre_install and "-y" not in pre_install:
-                    pre_install = pre_install.replace(
-                        "apt-get install", "apt-get install -y --no-install-recommends"
-                    )
-                elif "apt install" in pre_install and "-y" not in pre_install:
-                    pre_install = pre_install.replace(
-                        "apt install", "apt install -y --no-install-recommends"
-                    )
-                setup_commands.append(pre_install)
-
-        # Install dependencies
-        if "packages" in specs and specs["packages"] is not None:
-            if isinstance(specs["packages"], list):
-                for package in specs["packages"]:
-                    if ".txt" in package:
-                        cmd = f"uv pip install -r {package}"
-                    else:
-                        cmd = f"uv pip install {package}"
-                    setup_commands.append(cmd)
-            elif isinstance(specs["packages"], str):
-                if ".txt" in specs["packages"]:
-                    cmd = f"uv pip install -r {specs['packages']}"
-                else:
-                    cmd = f"uv pip install {specs['packages']}"
-                setup_commands.append(cmd)
-            else:
-                raise TypeError(
-                    f"{specs['packages']} has a type other than string and list so couldn't be parsed."
-                )
-
-        # Install additional packages if specified
-        if "pip_packages" in specs and specs["pip_packages"] is not None:
-            pip_packages = [one.split(";")[0].strip() for one in specs["pip_packages"]]
-            pip_packages = [f'"{one}"' for one in pip_packages]
-            pip_packages = " ".join(pip_packages)
-            cmd = f"uv pip install {pip_packages}"
-            setup_commands.append(cmd)
-        setup_commands.append(
-            "uv pip install pytest pytest-cov coverage pytest-json-report"
-        )
         return setup_commands
 
     def make_eval_script_list(self) -> list[str]:
@@ -309,20 +217,17 @@ class SWEBenchSpec(Spec):
         if "install" in specs and specs["install"] is not None:
             installs = specs["install"].split("; ")
             for one in installs:
-                if "python -m pip install" in one:
-                    install = one.replace("python -m ", "uv run python -m ")
-                    install = "uv pip install pip && " + install
-                else:
-                    install = one
-                if install.startswith("pip"):
-                    install = "uv " + install
+                install = one
+                if "python -m pip install" in install:
+                    install = install.replace("python -m pip install", "pip install")
+                elif install.startswith("pip install"):
+                    pass
                 elif install.startswith("python setup.py"):
-                    install = install.replace("python ", "uv run python ")
+                    pass
                 results.append(install)
         eval_script_list = (
             [
                 f"cd {self.repo_directory}",
-                "source .venv/bin/activate",
                 f"git reset --hard {self.instance['base_commit']}",
                 "git apply --allow-empty -v /patch.diff",
             ]

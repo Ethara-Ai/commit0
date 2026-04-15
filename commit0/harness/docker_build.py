@@ -2,7 +2,6 @@ import logging
 import os
 import platform as _platform
 import re
-import shutil
 import subprocess
 import tarfile
 import traceback
@@ -276,9 +275,13 @@ def build_image(
         with open(dockerfile_path, "w") as f:
             f.write(dockerfile)
 
+        # MITM CA cert is passed via BuildKit --secret (not COPY into context)
+        secret_flags: list[str] = []
         if mitm_ca_cert:
-            shutil.copy2(mitm_ca_cert, build_dir / "mitm-ca.crt")
-            logger.info(f"Injecting MITM CA cert from {mitm_ca_cert}")
+            secret_flags = ["--secret", f"id=mitm_ca,src={mitm_ca_cert}"]
+            logger.info(
+                f"Injecting MITM CA cert via BuildKit secret from {mitm_ca_cert}"
+            )
 
         buildargs = get_proxy_env()
         if buildargs:
@@ -301,21 +304,23 @@ def build_image(
 
         multiarch_flags = _multiarch_builder_args()
         build_context_flags: list[str] = []
-        if multiarch_flags and "commit0.base:latest" in dockerfile:
-            base_oci_tar = (
-                OCI_IMAGE_DIR / "commit0.base__latest" / "commit0.base__latest.tar"
-            )
+        base_image_match = re.search(r"FROM\s+(commit0\.base\.\S+)", dockerfile)
+        if multiarch_flags and base_image_match:
+            base_image_ref = base_image_match.group(1)
+            base_oci_key = base_image_ref.replace(":", "__")
+            base_oci_tar = OCI_IMAGE_DIR / base_oci_key / f"{base_oci_key}.tar"
             layout_dir = _ensure_oci_layout(base_oci_tar)
             if layout_dir:
                 build_context_flags = [
                     "--build-context",
-                    f"commit0.base:latest=oci-layout://{layout_dir}",
+                    f"{base_image_ref}=oci-layout://{layout_dir}",
                 ]
             else:
                 _logger.warning(
                     "Base OCI layout not available at %s; "
-                    "docker-container builder may fail to resolve FROM commit0.base:latest",
+                    "docker-container builder may fail to resolve FROM %s",
                     base_oci_tar,
+                    base_image_ref,
                 )
         oci_cmd = [
             "docker",
@@ -331,6 +336,7 @@ def build_image(
             f"type=oci,dest={oci_tar_path}",
             *nocache_flags,
             *buildarg_flags,
+            *secret_flags,
             str(build_dir),
         ]
         logger.info(f"Building OCI tarball: {' '.join(oci_cmd)}")
@@ -367,6 +373,7 @@ def build_image(
             "--load",
             *nocache_flags,
             *buildarg_flags,
+            *secret_flags,
             str(build_dir),
         ]
         logger.info(f"Loading native image ({native}): {' '.join(load_cmd)}")

@@ -252,7 +252,7 @@ class E2B(ExecutionContext):
         # let's try having a single sandbox for multiple operations
         # assume the sandbox needs to be alive for an hour, the max duration
         self.sb = Sandbox(timeout=60 * 60)
-        self.sb.commands.run("curl -LsSf https://astral.sh/uv/install.sh | sh")
+        self.sb.commands.run("pip install --upgrade pip")
 
         # setup sandbox env
         self.sb.files.write("setup.sh", spec.setup_script)

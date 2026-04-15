@@ -146,7 +146,7 @@ resolve_model() {
     local arg="$1"
     case "$arg" in
         opus)
-            MODEL_NAME="bedrock/global.anthropic.claude-opus-4-6-v1"
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/4w7tmk1iplxi"
             MODEL_SHORT="opus4.6"
             CACHE_PROMPTS="true"
             ;;
@@ -293,9 +293,13 @@ if [[ -z "$BRANCH_OVERRIDE" ]] && [[ "$NO_STAGE3_LINT" == "true" ]]; then
 fi
 
 # Base RUN_ID (without sample suffix)
-BASE_RUN_ID=$(echo "${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+# Folder structure: logs/agent/{dataset}/{model}/stage{N}/...
+BASE_RUN_ID_FLAT=$(echo "${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+DATASET_DIR_NAME=$(echo "${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+MODEL_DIR_NAME=$(echo "${MODEL_SHORT}" | tr -dc 'a-zA-Z0-9._-')
 if [[ "$NO_STAGE3_LINT" == "true" ]]; then
-    BASE_RUN_ID="${BASE_RUN_ID}_nolint-s3"
+    MODEL_DIR_NAME="${MODEL_DIR_NAME}_nolint-s3"
+    BASE_RUN_ID_FLAT="${BASE_RUN_ID_FLAT}_nolint-s3"
 fi
 
 # Set per-sample variables. When NUM_SAMPLES=1 no suffix is added.
@@ -304,12 +308,12 @@ set_sample_vars() {
     local sample_idx="$1"
     if [[ "$NUM_SAMPLES" -eq 1 ]]; then
         BRANCH_NAME="${BASE_BRANCH_NAME}"
-        RUN_ID="${BASE_RUN_ID}"
+        RUN_ID="${BASE_RUN_ID_FLAT}"
     else
         BRANCH_NAME="${BASE_BRANCH_NAME}-run_${sample_idx}"
-        RUN_ID="${BASE_RUN_ID}_run_${sample_idx}"
+        RUN_ID="${BASE_RUN_ID_FLAT}_run_${sample_idx}"
     fi
-    LOG_BASE="${BASE_DIR}/logs/agent/${RUN_ID}"
+    LOG_BASE="${BASE_DIR}/logs/agent/${DATASET_DIR_NAME}/${MODEL_DIR_NAME}/run_${sample_idx}"
     PIPELINE_LOG="${BASE_DIR}/logs/pipeline_${RUN_ID}_results.json"
     COMMIT0_CONFIG="${BASE_DIR}/.commit0_${RUN_ID}.yaml"
     AGENT_CONFIG="${BASE_DIR}/.agent_${RUN_ID}.yaml"
@@ -1711,7 +1715,7 @@ main() {
         fi
     done
 
-    RUN_ID="${BASE_RUN_ID}"
+    RUN_ID="${BASE_RUN_ID_FLAT}"
 
     if [[ "$NUM_SAMPLES" -gt 1 ]]; then
         if [[ "$SAMPLES_COMPLETED" -gt 0 ]]; then

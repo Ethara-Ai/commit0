@@ -201,7 +201,7 @@ def collect_test_ids_docker(
     client = docker.from_env()
 
     bash_cmd = (
-        f"cd /testbed && source .venv/bin/activate && {checkout}"
+        f"cd /testbed && {checkout}"
         f"python -m pytest --collect-only --override-ini='addopts=' "
         f"-p no:cacheprovider {test_dir} 2>&1; true"
     )
@@ -231,7 +231,7 @@ def collect_test_ids_docker(
 
     if not test_ids:
         bash_cmd_q = (
-            f"cd /testbed && source .venv/bin/activate && {checkout}"
+            f"cd /testbed && {checkout}"
             f"python -m pytest --collect-only -q --no-header --override-ini='addopts=' "
             f"-p no:cacheprovider {test_dir} 2>&1; true"
         )
@@ -280,7 +280,7 @@ def validate_base_commit_docker(
     client = docker.from_env()
 
     bash_cmd = (
-        f"cd /testbed && source .venv/bin/activate && "
+        f"cd /testbed && "
         f"python -m pytest --collect-only --override-ini='addopts=' "
         f"-p no:cacheprovider {test_dir} 2>&1; true"
     )
