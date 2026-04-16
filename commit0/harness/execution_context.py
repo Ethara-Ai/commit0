@@ -9,6 +9,7 @@ import docker
 import logging
 import modal
 import modal.io_streams
+import uuid
 from enum import auto
 from e2b_code_interpreter import Sandbox
 from strenum import StrEnum
@@ -107,7 +108,7 @@ class Docker(ExecutionContext):
         self.container = create_container(
             client=self.client,
             image_name=spec.repo_image_key,
-            container_name=spec.get_container_name(),
+            container_name=spec.get_container_name(run_id=uuid.uuid4().hex[:8]),
             nano_cpus=num_cpus,
             logger=logger,
             environment=proxy_env,
@@ -139,7 +140,12 @@ class Docker(ExecutionContext):
         excinst: Optional[BaseException],
         exctb: Optional[TracebackType],
     ) -> None:
-        cleanup_container(self.client, self.container, self.logger)
+        try:
+            cleanup_container(self.client, self.container, self.logger)
+        except Exception as e:
+            self.logger.error(f"Container cleanup failed: {e}")
+            if excinst is None:
+                raise
         close_logger(self.logger)
 
 

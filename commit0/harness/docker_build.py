@@ -496,6 +496,17 @@ def build_base_images(
     print("Base images built successfully.")
 
 
+def _get_image_created_timestamp(client: docker.DockerClient, image_name: str) -> str:
+    """Return the Created timestamp of a Docker image, or empty string if not found."""
+    try:
+        img = client.images.get(image_name)
+        return img.attrs.get("Created", "")
+    except docker.errors.ImageNotFound:
+        return ""
+    except docker.errors.APIError:
+        return ""
+
+
 def get_repo_configs_to_build(
     client: docker.DockerClient, dataset: list, dataset_type: str
 ) -> dict[str, Any]:
@@ -512,6 +523,8 @@ def get_repo_configs_to_build(
     image_scripts = dict()
     test_specs = get_specs_from_dataset(dataset, dataset_type, absolute=True)
 
+    base_timestamps: dict[str, str] = {}
+
     for test_spec in test_specs:
         try:
             client.images.get(test_spec.base_image_key)
@@ -521,12 +534,30 @@ def get_repo_configs_to_build(
                 "Please build the base images first."
             )
 
+        if test_spec.base_image_key not in base_timestamps:
+            base_timestamps[test_spec.base_image_key] = _get_image_created_timestamp(
+                client, test_spec.base_image_key
+            )
+
         image_exists = False
         try:
             client.images.get(test_spec.repo_image_key)
             image_exists = True
         except docker.errors.ImageNotFound:
             pass
+
+        if image_exists:
+            repo_ts = _get_image_created_timestamp(client, test_spec.repo_image_key)
+            base_ts = base_timestamps[test_spec.base_image_key]
+            if base_ts and repo_ts and base_ts > repo_ts:
+                _logger.warning(
+                    "Repo image %s is stale (built %s, base rebuilt %s) — scheduling rebuild",
+                    test_spec.repo_image_key,
+                    repo_ts[:19],
+                    base_ts[:19],
+                )
+                image_exists = False
+
         if not image_exists:
             image_scripts[test_spec.repo_image_key] = {
                 "setup_script": test_spec.setup_script,
@@ -608,12 +639,12 @@ def build_repo_images(
                     future.result()
                     successful.append(futures[future])
                 except BuildImageError as e:
-                    print(f"BuildImageError {e.image_name}")
+                    _logger.error(f"BuildImageError {e.image_name}")
                     traceback.print_exc()
                     failed.append(futures[future])
                     continue
                 except Exception:
-                    print("Error building image")
+                    _logger.error(f"Error building image {futures[future]}")
                     traceback.print_exc()
                     failed.append(futures[future])
                     continue

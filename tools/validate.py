@@ -566,8 +566,9 @@ cat /tmp/coverage.json 2>/dev/null || echo '{{}}'
 
     except subprocess.TimeoutExpired:
         result["docker_error"] = f"Timeout after {timeout}s"
-        # Kill container
+        # Kill and remove container to avoid orphans
         subprocess.run(["docker", "kill", container_name], capture_output=True)
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
     except Exception as e:
         result["docker_error"] = str(e)[:500]
 

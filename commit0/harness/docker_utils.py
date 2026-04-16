@@ -298,8 +298,8 @@ def create_container(
         # If an error occurs, clean up the container and raise an exception
         logger.error(f"Error creating container for {image_name}: {e}")
         logger.info(traceback.format_exc())
-        assert container is not None
-        cleanup_container(client, container, logger)
+        if container is not None:
+            cleanup_container(client, container, logger)
         raise
 
 

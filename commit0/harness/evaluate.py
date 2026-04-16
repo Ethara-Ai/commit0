@@ -3,6 +3,8 @@ import logging
 import os
 from collections import Counter
 
+import docker
+import docker.errors
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from typing import Iterator, Union
@@ -10,6 +12,7 @@ from typing import Iterator, Union
 from commit0.harness.run_pytest_ids import main as run_tests
 from commit0.harness.get_pytest_ids import main as get_tests
 from commit0.harness.constants import RepoInstance, SPLIT, RUN_PYTEST_LOG_DIR
+from commit0.harness.spec import get_specs_from_dataset
 from commit0.harness.utils import (
     get_hash_string,
     get_active_branch,
@@ -20,6 +23,47 @@ logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+def _preflight_check_images(
+    dataset_name: str,
+    dataset_split: str,
+    backend: str,
+) -> list[str]:
+    """Validate that all required Docker images exist BEFORE launching evaluation.
+
+    Returns a list of missing image names. An empty list means all images are present.
+    This catches missing/deleted images early with a clear error message instead of
+    N parallel threads each failing independently with confusing docker pull errors.
+    """
+    if backend.upper() != "LOCAL":
+        return []  # only Docker backend needs local images
+
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException as e:
+        logger.error(f"Pre-flight: cannot connect to Docker daemon: {e}")
+        return ["<docker-daemon-unreachable>"]
+
+    dataset = load_dataset_from_config(dataset_name, split=dataset_split)
+    dataset_type = "swebench" if "swe" in dataset_name.lower() else "commit0"
+    specs = get_specs_from_dataset(list(dataset), dataset_type, absolute=True)
+
+    missing = []
+    checked_images: set[str] = set()
+    for spec in specs:
+        for image_key in (spec.base_image_key, spec.repo_image_key):
+            if image_key in checked_images:
+                continue
+            checked_images.add(image_key)
+            try:
+                client.images.get(image_key)
+            except docker.errors.ImageNotFound:
+                missing.append(image_key)
+            except docker.errors.APIError as e:
+                logger.warning(f"Pre-flight: API error checking {image_key}: {e}")
+
+    return missing
 
 
 def main(
@@ -79,6 +123,18 @@ def main(
         log_dirs.append(str(log_dir))
         triples.append((example["instance_id"], example["test"]["test_dir"], branch))
 
+    # Pre-flight: validate all required Docker images exist before launching parallel eval
+    if not rebuild_image:
+        missing_images = _preflight_check_images(dataset_name, dataset_split, backend)
+        if missing_images:
+            logger.error(
+                f"Pre-flight failed: {len(missing_images)} Docker image(s) not found: "
+                f"{missing_images}. Run 'commit0 build' first."
+            )
+            raise RuntimeError(
+                f"Missing Docker images: {missing_images}. Run 'commit0 build' first."
+            )
+
     with tqdm(total=len(repos), smoothing=0, desc="Evaluating repos") as pbar:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             # Create a future for running each instance
@@ -103,6 +159,10 @@ def main(
             # Wait for each future to complete
             for future in as_completed(futures):
                 pbar.update(1)
+                try:
+                    future.result()
+                except Exception as e:
+                    logger.error(f"Evaluation failed for a repo: {e}")
 
     # get numbers
     out = []
@@ -112,6 +172,15 @@ def main(
         test_ids = get_tests(name, verbose=0)
         test_ids = [xx for x in test_ids for xx in x if xx]
         if not os.path.exists(report_file):
+            log_parent = os.path.dirname(report_file)
+            test_output_file = os.path.join(log_parent, "test_output.txt")
+            if os.path.exists(test_output_file):
+                reason = "pytest_crash_or_collection_error"
+            else:
+                reason = "container_or_infra_failure"
+            logger.warning(
+                f"{name}: missing report.json ({reason}) — check {log_parent}"
+            )
             out.append(
                 {
                     "name": name,
