@@ -431,13 +431,18 @@ def quick_import_check(repo_dir: Path, src_dir: str) -> tuple[bool, str]:
     import_name = package_name.replace("-", "_")
 
     try:
+        env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+        # For src-layout packages (e.g. src/wtforms/), Python needs PYTHONPATH
+        src_layout_dir = repo_dir / "src"
+        if src_layout_dir.is_dir():
+            env["PYTHONPATH"] = str(src_layout_dir)
         result = subprocess.run(
             [sys.executable, "-c", f"import {import_name}"],
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
             timeout=30,
-            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+            env=env,
         )
         if result.returncode == 0:
             return True, ""

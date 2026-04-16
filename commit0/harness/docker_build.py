@@ -151,6 +151,29 @@ def _ensure_oci_layout(oci_tar: Path) -> Path | None:
         return None
 
 
+def _check_qemu_support(platform_str: str) -> bool:
+    """Check if QEMU/binfmt is set up for the given Docker platform."""
+    try:
+        result = subprocess.run(
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--platform",
+                platform_str,
+                "alpine",
+                "echo",
+                "ok",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        return result.returncode == 0
+    except Exception:
+        return False
+
+
 PROXY_ENV_KEYS = [
     "http_proxy",
     "https_proxy",
@@ -322,6 +345,15 @@ def build_image(
                     base_oci_tar,
                     base_image_ref,
                 )
+        if "," in platform:
+            native = _native_platform()
+            for plat in platform.split(","):
+                if plat.strip() != native and not _check_qemu_support(plat.strip()):
+                    _logger.warning(
+                        "QEMU/binfmt not available for %s — OCI build may fail",
+                        plat.strip(),
+                    )
+
         oci_cmd = [
             "docker",
             "buildx",
@@ -344,8 +376,17 @@ def build_image(
         for line in (oci_result.stderr or "").splitlines():
             logger.info(ansi_escape.sub("", line))
         if oci_result.returncode != 0:
+            is_multiarch = "," in platform
+            if is_multiarch:
+                raise BuildImageError(
+                    image_name,
+                    f"Multi-arch OCI build failed (fatal for multi-arch): "
+                    f"rc={oci_result.returncode} "
+                    f"{oci_result.stderr.splitlines()[-1] if oci_result.stderr else 'unknown error'}",
+                    logger,
+                )
             logger.warning(
-                f"OCI tarball build failed (non-fatal, skipping ECR export): "
+                f"OCI tarball build failed (non-fatal for single-arch): "
                 f"rc={oci_result.returncode} "
                 f"{oci_result.stderr.splitlines()[-1] if oci_result.stderr else 'unknown error'}"
             )
@@ -418,8 +459,16 @@ def build_base_images(
     _multiarch_builder_args()
 
     for image_name, (dockerfile, platform) in base_images.items():
+        oci_key = image_name.replace(":", "__")
+        oci_tar_path = OCI_IMAGE_DIR / oci_key / f"{oci_key}.tar"
+        daemon_exists = False
         try:
             client.images.get(image_name)
+            daemon_exists = True
+        except docker.errors.ImageNotFound:
+            pass
+
+        if daemon_exists and oci_tar_path.exists():
             if mitm_ca_cert:
                 print(
                     f"WARNING: Base image {image_name} already exists but MITM CA cert "
@@ -429,8 +478,11 @@ def build_base_images(
             else:
                 print(f"Base image {image_name} already exists, skipping build.")
             continue
-        except docker.errors.ImageNotFound:
-            pass
+        elif daemon_exists:
+            print(
+                f"Base image {image_name} in daemon but OCI tarball missing, rebuilding."
+            )
+
         print(f"Building base image ({image_name})")
         build_image(
             image_name=image_name,

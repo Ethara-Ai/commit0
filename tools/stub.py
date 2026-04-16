@@ -99,6 +99,16 @@ def _extract_call_names(node: ast.AST) -> set[str]:
     return names
 
 
+def _is_type_checking_guard(node: ast.If) -> bool:
+    """Return True if this ``if`` node is a ``if TYPE_CHECKING:`` guard."""
+    test = node.test
+    if isinstance(test, ast.Name) and test.id == "TYPE_CHECKING":
+        return True
+    if isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING":
+        return True
+    return False
+
+
 def _scan_dir_for_import_time_names(
     scan_dir: Path, names: set[str], all_trees: list[ast.Module]
 ) -> None:
@@ -180,6 +190,9 @@ def _scan_dir_for_import_time_names(
                     and isinstance(node, getattr(ast, "TryStar"))
                 )
             ):
+                # Skip `if TYPE_CHECKING:` blocks — those are not import-time
+                if isinstance(node, ast.If) and _is_type_checking_guard(node):
+                    continue
                 # Calls in the test condition
                 if isinstance(node, ast.If) and node.test:
                     names.update(_extract_call_names(node.test))
@@ -202,6 +215,13 @@ def _scan_dir_for_import_time_names(
                             names.update(_extract_call_names(value))
                     elif isinstance(sub, ast.Expr):
                         names.update(_extract_call_names(sub))
+
+            # 5. Module-level from-imports make names import-time references
+            elif isinstance(node, ast.ImportFrom):
+                for alias in node.names:
+                    name = alias.asname if alias.asname else alias.name
+                    if name != "*":
+                        names.add(name)
 
 
 def collect_import_time_names(

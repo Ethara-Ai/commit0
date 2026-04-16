@@ -182,3 +182,70 @@ def test_backward_compat_no_extra_dirs(tmp_path: Path) -> None:
 
     result = collect_import_time_names(pkg)
     assert "setup" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 7 — ast.ImportFrom scanning (wtforms-style: from X import Y)
+# ---------------------------------------------------------------------------
+def test_import_from_detected(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+
+    _write(pkg / "__init__.py", "")
+    _write(
+        pkg / "core.py",
+        """\
+        def clean_key(key):
+            return key.strip()
+        """,
+    )
+    _write(
+        pkg / "widgets.py",
+        """\
+        from pkg.core import clean_key
+
+        DEFAULT = clean_key("hello")
+        """,
+    )
+
+    result = collect_import_time_names(pkg)
+    assert "clean_key" in result
+
+
+# ---------------------------------------------------------------------------
+# Test 8 — TYPE_CHECKING imports excluded
+# ---------------------------------------------------------------------------
+def test_type_checking_imports_excluded(tmp_path: Path) -> None:
+    pkg = tmp_path / "pkg"
+
+    _write(pkg / "__init__.py", "")
+    _write(
+        pkg / "module.py",
+        """\
+        from __future__ import annotations
+        from typing import TYPE_CHECKING
+        from pkg.core import real_func
+
+        if TYPE_CHECKING:
+            from pkg.models import MyModel
+
+        val = real_func()
+        """,
+    )
+    _write(
+        pkg / "core.py",
+        """\
+        def real_func():
+            return 42
+        """,
+    )
+    _write(
+        pkg / "models.py",
+        """\
+        class MyModel:
+            pass
+        """,
+    )
+
+    result = collect_import_time_names(pkg)
+    assert "real_func" in result
+    assert "MyModel" not in result

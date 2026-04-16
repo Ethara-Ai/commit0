@@ -171,8 +171,20 @@ def build(
         help="Set this to 2 for more logging information",
         count=True,
     ),
+    single_arch: bool = typer.Option(
+        False,
+        "--single-arch",
+        help="Build for native architecture only (skip multi-arch OCI tarball)",
+    ),
 ) -> None:
     """Build Commit0 split you choose in Setup Stage."""
+    if single_arch:
+        import platform as _plat
+
+        machine = _plat.machine()
+        native = "linux/arm64" if machine in ("arm64", "aarch64") else "linux/amd64"
+        os.environ["COMMIT0_BUILD_PLATFORMS"] = native
+
     check_commit0_path()
 
     commit0_config = read_commit0_config_file(commit0_config_file)

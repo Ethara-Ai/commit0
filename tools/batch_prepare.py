@@ -243,7 +243,7 @@ def prepare_single_repo(
             logger.info("  Import check passed (mode=%s)", removal_mode)
 
     # 5. Remove GitHub Actions workflows (avoids PAT workflow scope error)
-    branch_name = f"commit0_{removal_mode}"
+    branch_name = "commit0_all"
     git(repo_dir, "checkout", branch_name, check=False)
     if _remove_workflows(repo_dir):
         base_commit = get_head_sha(repo_dir)
@@ -359,6 +359,7 @@ def print_summary(
     test_id_results: dict[str, int],
     failures: dict[str, str],
     elapsed: float,
+    allow_broken_stubs: bool = False,
 ) -> None:
     print(f"\n{'=' * 100}")
     print(f"BATCH PREPARATION SUMMARY")
@@ -396,6 +397,8 @@ def print_summary(
         print(
             "  Fix: Re-stub with smart mode or selectively preserve critical functions.\n"
         )
+        if not allow_broken_stubs:
+            sys.exit(1)
 
     if failures:
         print("FAILED REPOS:")
@@ -485,8 +488,26 @@ Examples:
         action="store_true",
         help="Disable adaptive fallback: don't retry with different removal modes on import failure",
     )
+    parser.add_argument(
+        "--allow-broken-stubs",
+        action="store_true",
+        help="Continue even if some repos have 0 tests at base_commit (default: exit 1)",
+    )
+    parser.add_argument(
+        "--single-arch",
+        action="store_true",
+        help="Build for native architecture only (skip multi-arch OCI tarball)",
+    )
 
     args = parser.parse_args()
+
+    if args.single_arch:
+        import platform as _plat
+
+        machine = _plat.machine()
+        native = "linux/arm64" if machine in ("arm64", "aarch64") else "linux/amd64"
+        os.environ["COMMIT0_BUILD_PLATFORMS"] = native
+        logger.info("Single-arch mode: COMMIT0_BUILD_PLATFORMS=%s", native)
 
     csv_path = Path(args.csv_file)
     if not csv_path.exists():
@@ -604,7 +625,13 @@ Examples:
         )
 
     elapsed = time.monotonic() - start_time
-    print_summary(entries, test_id_results, failures, elapsed)
+    print_summary(
+        entries,
+        test_id_results,
+        failures,
+        elapsed,
+        allow_broken_stubs=args.allow_broken_stubs,
+    )
 
     logger.info("Dataset: %s", output_path)
     logger.info("State:   %s", state_path)
