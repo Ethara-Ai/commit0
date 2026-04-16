@@ -176,6 +176,7 @@ def _find_docker_image(repo_name: str) -> str | None:
                     return tag
         return None
     except Exception:
+        logger.debug("Failed to find Docker image for %s", repo_name, exc_info=True)
         return None
 
 
@@ -255,6 +256,7 @@ def collect_test_ids_docker(
                 else (raw_err_q or "")
             )
         except requests.exceptions.ReadTimeout:
+            logger.warning("Docker pytest --collect-only -q fallback timed out for %s", repo_name)
             return []
         test_ids = _parse_collect_output(stdout_q)
 

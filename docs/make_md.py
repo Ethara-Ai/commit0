@@ -1,8 +1,11 @@
 import datasets
+import logging
 import subprocess
 
 import requests
 from bs4 import BeautifulSoup
+
+logger = logging.getLogger(__name__)
 
 def get_github_avatar(repo):
     """
@@ -18,7 +21,7 @@ def get_github_avatar(repo):
 
         # Check if the request was successful
         if response.status_code != 200:
-            print(f"Failed to fetch page for {repo}. Status code: {response.status_code}")
+            logger.warning("Failed to fetch page for %s. Status code: %s", repo, response.status_code)
             return None
 
         # Parse the HTML content using BeautifulSoup
@@ -31,11 +34,11 @@ def get_github_avatar(repo):
             avatar_url = meta_tag['content']
             return avatar_url
         else:
-            print(f"Avatar URL not found for {repo}")
+            logger.debug("Avatar URL not found for %s", repo)
             return None
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.warning("Error fetching avatar for %s: %s", repo, e)
         return None
 
 d = datasets.load_dataset("wentingzhao/commit0_docstring", split="test")

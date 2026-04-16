@@ -176,6 +176,7 @@ def github_api(
                 else:
                     raise
         except Exception:
+            logger.debug("GitHub API request failed (attempt %d/%d)", attempt + 1, retries, exc_info=True)
             if attempt < retries - 1:
                 time.sleep(2**attempt)
             else:

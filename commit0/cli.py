@@ -1,3 +1,4 @@
+import logging
 import typer
 from pathlib import Path
 from typing import Union, List
@@ -15,6 +16,8 @@ import subprocess
 import yaml
 import os
 import sys
+
+logger = logging.getLogger(__name__)
 
 commit0_app = typer.Typer(
     no_args_is_help=True,
@@ -47,6 +50,7 @@ def check_commit0_path() -> None:
         # TODO(erikbern): check returncode?
         return
     except FileNotFoundError:
+        logger.warning("commit0 command not found on PATH")
         typer.echo(
             typer.style(
                 "The `commit0` command was not found on your path!", fg=typer.colors.RED
@@ -58,6 +62,7 @@ def check_commit0_path() -> None:
             )
         )
     except PermissionError:
+        logger.warning("commit0 command is not executable")
         typer.echo(
             typer.style("The `commit0` command is not executable!", fg=typer.colors.RED)
             + "\n"
@@ -87,8 +92,12 @@ def check_valid(one: str, total: Union[list[str], dict[str, list[str]]]) -> None
 
 
 def write_commit0_config_file(dot_file_path: str, config: dict) -> None:
-    with open(dot_file_path, "w") as f:
-        yaml.dump(config, f, default_flow_style=False)
+    try:
+        with open(dot_file_path, "w") as f:
+            yaml.dump(config, f, default_flow_style=False)
+    except OSError as e:
+        logger.error("Failed to write commit0 config to %s: %s", dot_file_path, e)
+        raise
 
 
 _COMMIT0_REQUIRED_KEYS = {
@@ -124,6 +133,7 @@ def validate_commit0_config(config: dict, config_path: str) -> None:
 def read_commit0_config_file(dot_file_path: str) -> dict:
     """Read and validate .commit0.yaml config file."""
     if not os.path.exists(dot_file_path):
+        logger.error("Commit0 config file not found: %s", dot_file_path)
         raise FileNotFoundError(
             f"The commit0 dot file '{dot_file_path}' does not exist."
         )
@@ -327,6 +337,7 @@ def test(
                     commit0_config["base_dir"], repo_or_repo_path.split("/")[-1]
                 )
                 branch = get_active_branch(git_path)
+                logger.debug("Branch resolved to active branch: %s", branch)
 
     if stdin:
         # Read test names from stdin

@@ -55,6 +55,7 @@ class Spec(ABC):
         setup = self._get_setup_dict()
         if "python" in setup:
             return str(setup["python"])
+        logger.debug("No python version specified, defaulting to 3.12")
         return "3.12"
 
     def _get_setup_dict(self) -> dict:

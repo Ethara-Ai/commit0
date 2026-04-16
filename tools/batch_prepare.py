@@ -114,7 +114,7 @@ def _get_latest_tag(repo_dir: Path) -> str | None:
         if tags.returncode == 0 and tags.stdout.strip():
             return tags.stdout.strip().split("\n")[0]
     except Exception:
-        pass
+        logger.debug("Failed to get latest tag for %s", repo_dir, exc_info=True)
     return None
 
 

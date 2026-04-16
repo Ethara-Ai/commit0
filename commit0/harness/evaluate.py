@@ -114,6 +114,7 @@ def main(
         if branch is None:
             git_path = os.path.join(base_dir, example["instance_id"])
             branch = get_active_branch(git_path)
+            logger.debug("Branch not specified, resolved to: %s", branch)
         log_dir = (
             RUN_PYTEST_LOG_DIR
             / example["instance_id"].split("/")[-1]
@@ -195,9 +196,11 @@ def main(
             report = json.load(file)
         # new version of pytest json
         if "created" in report:
+            logger.debug("Using new pytest report format for %s", name)
             tests = {x["nodeid"]: x["call"] for x in report["tests"] if "call" in x}
         # old version of pytest json
         else:
+            logger.debug("Using old pytest report format for %s", name)
             tests = {
                 x["nodeid"]: {"outcome": x["outcome"], "duration": x["duration"]}
                 for x in report
@@ -239,6 +242,7 @@ def main(
     averaged_passed = sum([x["passed"] for x in out]) / len(out)
     print(f"total runtime: {total_runtime}")
     print(f"average pass rate: {averaged_passed}")
+    logger.info("Evaluation complete: %d repos, avg pass rate %.2f%%, total runtime %.1fs", len(out), averaged_passed * 100, total_runtime)
 
 
 __all__ = []

@@ -546,7 +546,7 @@ cat /tmp/coverage.json 2>/dev/null || echo '{{}}'
                 result["tests_error"] = summary.get("error", 0)
                 result["test_runtime_seconds"] = round(report.get("duration", 0), 1)
             except json.JSONDecodeError:
-                pass
+                logger.debug("Failed to parse pytest JSON report")
 
         # Parse coverage
         cov_match = re.search(r"=== COVERAGE ===\n(.+)", output, re.DOTALL)
@@ -557,7 +557,7 @@ cat /tmp/coverage.json 2>/dev/null || echo '{{}}'
                     cov.get("totals", {}).get("percent_covered", 0), 1
                 )
             except json.JSONDecodeError:
-                pass
+                logger.debug("Failed to parse coverage JSON")
 
         if proc.returncode != 0 and result["tests_collected"] == 0:
             result["docker_error"] = (

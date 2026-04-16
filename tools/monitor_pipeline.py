@@ -2,6 +2,7 @@
 """Live pipeline monitor. Usage: .venv/bin/python tools/monitor_pipeline.py [RUN_ID]"""
 
 import json
+import logging
 import re
 import subprocess
 import sys
@@ -15,6 +16,8 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.style import Style
 from rich.text import Text
+
+logger = logging.getLogger(__name__)
 
 
 def _find_project_root():
@@ -105,7 +108,7 @@ def get_current_stage_key(log_path):
             if 1 <= num <= 3:
                 return STAGES[num - 1][0]
     except OSError:
-        pass
+        logger.debug("Failed to read log file for stage key detection", exc_info=True)
     return None
 
 
@@ -153,7 +156,7 @@ def get_stage_cost(stage_dir):
             if last:
                 total += float(last.group(1))
         except OSError:
-            pass
+            logger.debug("Failed to read cost from %s", log, exc_info=True)
     return total
 
 
@@ -168,6 +171,7 @@ def is_alive():
             == 0
         )
     except Exception:
+        logger.debug("Failed to check if pipeline is alive", exc_info=True)
         return False
 
 
@@ -192,7 +196,7 @@ def get_elapsed(log_path, end_time_str=None):
             s = int((end - start).total_seconds())
             return f"{s // 3600:02d}:{(s % 3600) // 60:02d}:{s % 60:02d}"
     except Exception:
-        pass
+        logger.debug("Failed to parse elapsed time from log", exc_info=True)
     return ""
 
 

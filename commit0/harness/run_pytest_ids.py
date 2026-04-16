@@ -1,8 +1,11 @@
 import git
+import logging
 import os
 import sys
 import traceback
 from pathlib import Path
+
+_module_logger = logging.getLogger(__name__)
 
 from typing import Iterator, Union
 from commit0.harness.constants import (

@@ -123,17 +123,20 @@ def clone_repo(
             repo = git.Repo(clone_dir)
             repo.git.fetch()
         except git.exc.GitCommandError as e:
+            logger.error("Failed to fetch updates for %s: %s", clone_dir, e)
             raise RuntimeError(f"Failed to fetch updates for repository: {e}")
     else:
         logger.info(f"Cloning {clone_url} into {clone_dir}")
         try:
             repo = git.Repo.clone_from(clone_url, clone_dir)
         except git.exc.GitCommandError as e:
+            logger.error("Failed to clone %s: %s", clone_url, e)
             raise RuntimeError(f"Failed to clone repository: {e}")
 
     try:
         repo.git.checkout(branch)
     except git.exc.GitCommandError as e:
+        logger.error("Failed to check out branch %s in %s: %s", branch, clone_dir, e)
         raise RuntimeError(f"Failed to check out {branch}: {e}")
 
     return repo

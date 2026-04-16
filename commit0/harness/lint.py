@@ -79,6 +79,7 @@ def main(
         if repo_or_repo_dir.endswith("/"):
             repo_or_repo_dir = repo_or_repo_dir[:-1]
         if repo_name in os.path.basename(repo_or_repo_dir):
+            logger.debug("Found matching repo: %s", repo_name)
             break
     assert example is not None, "No example available"
     assert repo_name is not None, "No repo available"
@@ -90,6 +91,7 @@ def main(
         elif os.path.isdir(repo_dir):
             repo = repo_dir
         else:
+            logger.error("Neither %s nor %s is a valid path", repo_dir, repo_or_repo_dir)
             raise Exception(
                 f"Neither {repo_dir} nor {repo_or_repo_dir} is a valid path.\nUsage: commit0 lint {{repo_or_repo_dir}}"
             )
@@ -115,6 +117,7 @@ def main(
     if not os.path.isfile(pre_commit_bin):
         pre_commit_bin = shutil.which("pre-commit")
     if not pre_commit_bin:
+        logger.error("pre-commit command not found")
         raise FileNotFoundError(
             "Error: pre-commit command not found. "
             "Ensure it is installed in the active virtual environment."
@@ -144,21 +147,26 @@ def main(
 
     from commit0.harness.lint_filter import filter_lint_output
 
+    logger.info("Using pre-commit binary: %s", pre_commit_bin)
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         lint_result = filter_lint_output(result.stdout, project_package, known_deps)
         print(lint_result.output)
+        logger.info("Lint completed successfully")
         sys.exit(result.returncode)
     except subprocess.CalledProcessError as e:
         raw = e.output or ""
         lint_result = filter_lint_output(raw, project_package, known_deps)
         print(lint_result.output)
+        logger.error("Lint failed (exit code %d)", e.returncode)
         if lint_result.code_error_count == 0 and lint_result.suppressed_count > 0:
             sys.exit(0)
         sys.exit(e.returncode)
     except FileNotFoundError as e:
+        logger.error("pre-commit binary not found: %s", e)
         raise FileNotFoundError(f"Error running pre-commit: {e}") from e
     except Exception as e:
+        logger.error("Unexpected error running pre-commit: %s", e, exc_info=True)
         raise Exception(f"An unexpected error occurred: {e}")
 
 

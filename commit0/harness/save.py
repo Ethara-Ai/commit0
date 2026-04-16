@@ -26,11 +26,10 @@ def main(
     if github_token is None:
         # Get GitHub token from environment variable if not provided
         github_token = os.environ.get("GITHUB_TOKEN")
-    if not github_token:
-        raise EnvironmentError(
-            "GITHUB_TOKEN is required but not set. "
-            "Set it via --github-token flag or GITHUB_TOKEN environment variable."
-        )
+        if github_token:
+            logger.debug("Using GITHUB_TOKEN from environment variable")
+        else:
+            logger.warning("No GitHub token provided via argument or GITHUB_TOKEN env var")
     dataset: Iterator[RepoInstance] = load_dataset_from_config(
         dataset_name, split=dataset_split
     )  # type: ignore
@@ -54,6 +53,7 @@ def main(
 
         # Initialize the local repository if it is not already initialized
         if not os.path.exists(local_repo_path):
+            logger.error("Local repo path does not exist: %s", local_repo_path)
             raise OSError(f"{local_repo_path} does not exists")
         else:
             repo = git.Repo(local_repo_path)

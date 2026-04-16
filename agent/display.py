@@ -1,3 +1,5 @@
+import json
+import logging
 import time
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -17,8 +19,9 @@ from rich.rule import Rule
 from rich.align import Align
 from collections import OrderedDict
 from types import TracebackType
-import json
 from datetime import datetime
+
+logger = logging.getLogger(__name__)
 
 
 class RepoBox:
@@ -416,6 +419,8 @@ class TerminalDisplay:
         )
         print("-" * 80)
 
+        logger.info("Agent run summary: %d repos, %.2fs total, %.2f$ spent", len(self.end_time_per_repo), self.total_time_spent, total_money)
+
         # Write summary to JSON file
 
         summary_data = {
@@ -437,12 +442,12 @@ class TerminalDisplay:
             ],
         }
 
-        with open(
-            f"processing_summary_{self.branch_name}.json",
-            "w",
-        ) as json_file:
-            json.dump(summary_data, json_file, indent=4)
-
-        print(
-            f"\nSummary has been written to processing_summary_{self.branch_name}.json"
-        )
+        json_file_name = f"processing_summary_{self.branch_name}.json"
+        try:
+            with open(json_file_name, "w") as json_file:
+                json.dump(summary_data, json_file, indent=4)
+            print(
+                f"\nSummary has been written to processing_summary_{self.branch_name}.json"
+            )
+        except OSError as e:
+            logger.error("Failed to write summary JSON to %s: %s", json_file_name, e)

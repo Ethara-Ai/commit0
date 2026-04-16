@@ -470,20 +470,21 @@ def build_base_images(
 
         if daemon_exists and oci_tar_path.exists():
             if mitm_ca_cert:
-                print(
-                    f"WARNING: Base image {image_name} already exists but MITM CA cert "
-                    f"was found at {mitm_ca_cert}. If the cert was added after the base "
-                    f"image was built, delete the old image: docker rmi {image_name}"
+                _logger.warning(
+                    "Base image %s already exists but MITM CA cert "
+                    "was found at %s. If the cert was added after the base "
+                    "image was built, delete the old image: docker rmi %s",
+                    image_name, mitm_ca_cert, image_name,
                 )
             else:
-                print(f"Base image {image_name} already exists, skipping build.")
+                _logger.info("Base image %s already exists, skipping build.", image_name)
             continue
         elif daemon_exists:
-            print(
-                f"Base image {image_name} in daemon but OCI tarball missing, rebuilding."
+            _logger.info(
+                "Base image %s in daemon but OCI tarball missing, rebuilding.", image_name
             )
 
-        print(f"Building base image ({image_name})")
+        _logger.info("Building base image (%s)", image_name)
         build_image(
             image_name=image_name,
             setup_scripts={},
@@ -493,7 +494,7 @@ def build_base_images(
             build_dir=BASE_IMAGE_BUILD_DIR / image_name.replace(":", "__"),
             mitm_ca_cert=mitm_ca_cert,
         )
-    print("Base images built successfully.")
+    _logger.info("Base images built successfully.")
 
 
 def _get_image_created_timestamp(client: docker.DockerClient, image_name: str) -> str:
@@ -593,22 +594,22 @@ def build_repo_images(
     # Resolve MITM cert ONCE — consistent across all parallel builds
     mitm_ca_cert = _resolve_mitm_ca_cert()
     if mitm_ca_cert:
-        print(f"MITM CA cert: {mitm_ca_cert}")
+        _logger.info("MITM CA cert: %s", mitm_ca_cert)
     proxy_env = get_proxy_env()
     if proxy_env:
-        print(f"Proxy env vars detected: {list(proxy_env.keys())}")
+        _logger.info("Proxy env vars detected: %s", list(proxy_env.keys()))
     if mitm_ca_cert and not proxy_env:
-        print(
-            "WARNING: MITM CA cert found but no proxy env vars (http_proxy/https_proxy) "
+        _logger.warning(
+            "MITM CA cert found but no proxy env vars (http_proxy/https_proxy) "
             "are set. The cert will be installed but traffic won't route through a proxy."
         )
 
     build_base_images(client, dataset, dataset_type, mitm_ca_cert=mitm_ca_cert)
     configs_to_build = get_repo_configs_to_build(client, dataset, dataset_type)
     if len(configs_to_build) == 0:
-        print("No repo images need to be built.")
+        _logger.info("No repo images need to be built.")
         return [], []
-    print(f"Total repo images to build: {len(configs_to_build)}")
+    _logger.info("Total repo images to build: %d", len(configs_to_build))
 
     # Pre-create multiarch builder in main thread to avoid race in worker threads
     _multiarch_builder_args()
@@ -639,8 +640,7 @@ def build_repo_images(
                     future.result()
                     successful.append(futures[future])
                 except BuildImageError as e:
-                    _logger.error(f"BuildImageError {e.image_name}")
-                    traceback.print_exc()
+                    _logger.error("BuildImageError %s", e.image_name, exc_info=True)
                     failed.append(futures[future])
                     continue
                 except Exception:
@@ -650,9 +650,9 @@ def build_repo_images(
                     continue
 
     if len(failed) == 0:
-        print("All repo images built successfully.")
+        _logger.info("All repo images built successfully.")
     else:
-        print(f"{len(failed)} repo images failed to build.")
+        _logger.warning("%d repo images failed to build.", len(failed))
 
     return successful, failed
 

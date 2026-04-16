@@ -1,9 +1,12 @@
+import logging
 import typer
 from agent.run_agent_no_rich import run_agent as run_agent_no_rich
 from agent.run_agent import run_agent
 from commit0.harness.constants import RUN_AGENT_LOG_DIR
 import subprocess
 from agent.agent_utils import write_agent_config
+
+logger = logging.getLogger(__name__)
 
 agent_app = typer.Typer(
     no_args_is_help=True,
@@ -37,6 +40,7 @@ def check_aider_path() -> None:
         # TODO(erikbern): check returncode?
         return
     except FileNotFoundError:
+        logger.warning("aider command not found on PATH")
         typer.echo(
             typer.style(
                 "The `aider` command was not found on your path!", fg=typer.colors.RED
@@ -48,6 +52,7 @@ def check_aider_path() -> None:
             )
         )
     except PermissionError:
+        logger.warning("aider command is not executable")
         typer.echo(
             typer.style("The `aider` command is not executable!", fg=typer.colors.RED)
             + "\n"

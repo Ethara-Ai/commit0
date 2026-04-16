@@ -11,6 +11,8 @@ import os
 from typing import Any, Optional
 from agent.thinking_capture import ThinkingCapture
 
+_logger = logging.getLogger(__name__)
+
 BEDROCK_REGION_MODEL_PRICING = {
     "moonshotai.kimi-k2.5": {
         "input_cost_per_token": 6e-07,
@@ -87,6 +89,10 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
             if not underlying_model_id:
                 underlying_model_id = models[0].get("modelId", "")
 
+            if not underlying_model_id:
+                _logger.debug("Could not resolve underlying model ID from ARN: %s", model_name)
+                return
+
             from aider.llm import litellm as aider_litellm
             import litellm
 
@@ -94,6 +100,7 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
                 if base_id in underlying_model_id or underlying_model_id in base_id:
                     litellm.model_cost[model_name] = pricing.copy()
                     litellm.model_cost[model_name]["litellm_provider"] = "bedrock"
+                    _logger.debug("Matched pricing for model key: %s", base_id)
                     return
 
             region_key = (
@@ -103,15 +110,17 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
             )
             if region_key in litellm.model_cost:
                 litellm.model_cost[model_name] = litellm.model_cost[region_key].copy()
+                _logger.debug("Matched pricing via region key: %s", region_key)
                 return
 
             for key, val in litellm.model_cost.items():
                 if underlying_model_id in key and "bedrock" in key:
                     litellm.model_cost[model_name] = val.copy()
+                    _logger.debug("Matched pricing via generic key scan: %s", key)
                     return
 
     except Exception:
-        pass
+        _logger.debug("Failed to register Bedrock ARN pricing for model %s", model_name, exc_info=True)
 
 
 def handle_logging(logging_name: str, log_file: Path) -> None:
@@ -343,6 +352,7 @@ class AiderAgents(Agents):
             raise ValueError(f"Unsupported model: {model_name}")
 
         if not api_key:
+            _logger.error("No API key found for model %s", model_name)
             raise ValueError(
                 "API Key Error: There is no API key associated with the model for this agent. "
                 "Edit model_name parameter in .agent.yaml, export API key for that model, and try again."
@@ -393,8 +403,12 @@ class AiderAgents(Agents):
         )
 
         # Redirect print statements to the log file
-        sys.stdout = open(log_file, "a")
-        sys.stderr = open(log_file, "a")
+        try:
+            sys.stdout = open(log_file, "a")
+            sys.stderr = open(log_file, "a")
+        except OSError as e:
+            _logger.error("Failed to redirect stdout/stderr to %s: %s", log_file, e)
+            raise
 
         # Configure httpx and backoff logging
         handle_logging("httpx", log_file)
@@ -427,26 +441,31 @@ class AiderAgents(Agents):
         if test_first:
             test_errors = coder.commands.cmd_test(test_cmd)
             if test_errors:
+                _logger.info("Running coder with test errors for %s", fnames)
                 coder.run(test_errors)
+                _logger.info("Coder finished for %s", fnames)
         elif lint_first:
+            _logger.info("Running lint-first for %s", fnames)
             coder.commands.cmd_lint(fnames=fnames)
+            _logger.info("Lint finished for %s", fnames)
         else:
+            max_input = self.model.info.get("max_input_tokens", 0)
+            if max_input > 0:
+                estimated_tokens = len(message) // 4
+                if estimated_tokens > max_input:
+                    logger = logging.getLogger(__name__)
+                    logger.warning(
+                        f"Skipping: message ~{estimated_tokens} tokens exceeds "
+                        f"max_input_tokens {max_input} for {fnames}"
+                    )
+                    sys.stdout.close()
+                    sys.stderr.close()
+                    sys.stdout = sys.__stdout__
+                    sys.stderr = sys.__stderr__
+                    return AiderReturn(log_file)
+            _logger.info("Running coder for %s", fnames)
             coder.run(message)
-            # max_input = self.model.info.get("max_input_tokens", 0)
-            # if max_input > 0:
-            #     estimated_tokens = len(message) // 4
-            #     if estimated_tokens > max_input:
-            #         logger = logging.getLogger(__name__)
-            #         logger.warning(
-            #             f"Skipping: message ~{estimated_tokens} tokens exceeds "
-            #             f"max_input_tokens {max_input} for {fnames}"
-            #         )
-            #         sys.stdout.close()
-            #         sys.stderr.close()
-            #         sys.stdout = sys.__stdout__
-            #         sys.stderr = sys.__stderr__
-            #         return AiderReturn(log_file)
-            
+            _logger.info("Coder finished for %s", fnames)
 
         # Close redirected stdout and stderr
         sys.stdout.close()

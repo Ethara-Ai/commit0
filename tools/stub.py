@@ -126,7 +126,8 @@ def _scan_dir_for_import_time_names(
         try:
             source = py_file.read_text(encoding="utf-8")
             tree = ast.parse(source, str(py_file))
-        except (SyntaxError, UnicodeDecodeError):
+        except (SyntaxError, UnicodeDecodeError) as e:
+            logger.debug("Skipping %s: %s", py_file, e)
             continue
 
         all_trees.append(tree)
@@ -630,7 +631,8 @@ class StubTransformer:
         """After removing functions, replace empty class bodies with `pass`."""
         try:
             tree = ast.parse(source, filename=filename)
-        except SyntaxError:
+        except SyntaxError as e:
+            logger.debug("SyntaxError in _minify_ast for %s: %s", filename, e)
             return source
 
         lines = source.splitlines(keepends=True)

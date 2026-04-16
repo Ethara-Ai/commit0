@@ -123,15 +123,15 @@ def get_blank_repo_metrics(
             try:
                 code = open(filename, encoding="utf-8").read()
             except Exception as e:
-                print(f"{e}: Trouble opening {filename}")
+                logger.warning("Trouble opening %s: %s", filename, e)
                 continue
 
             filename = filename[len(blank_source_code_folder) :].lstrip(" /")
             try:
                 code_tree = ast.parse(code)
             except Exception as e:
-                print(
-                    f"{e}: Trouble parsing {os.path.join(blank_source_code_folder, filename)}"
+                logger.warning(
+                    "Trouble parsing %s: %s", os.path.join(blank_source_code_folder, filename), e
                 )
                 continue
             for node in ast.walk(code_tree):

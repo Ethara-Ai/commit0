@@ -92,6 +92,7 @@ def get_default_branch(repo_dir: Path) -> str:
         ref = git(repo_dir, "symbolic-ref", "refs/remotes/origin/HEAD")
         return ref.split("/")[-1]
     except subprocess.CalledProcessError:
+        logger.debug("Could not determine default branch via symbolic-ref, trying common names")
         # Fallback: check common names
         for branch in ["main", "master"]:
             try:

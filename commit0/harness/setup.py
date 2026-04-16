@@ -31,6 +31,7 @@ def main(
         or "bigcodebench" in dataset_name
         or "codecontests" in dataset_name
     ):
+        logger.info("Skipping setup for simple dataset: %s", dataset_name)
         return
     for example in dataset:
         repo_name = example["repo"].split("/")[-1]

@@ -77,6 +77,7 @@ def run_agent_for_repo(
     try:
         local_repo = Repo(repo_path)
     except Exception:
+        logger.error("Failed to open repo at %s: not a git repo", repo_path, exc_info=True)
         raise Exception(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
@@ -98,6 +99,7 @@ def run_agent_for_repo(
 
     # Check if there are changes in the current branch
     if local_repo.is_dirty():
+        logger.warning("Auto-committing uncommitted changes in %s", repo_path)
         # Stage all changes
         local_repo.git.add(A=True)
         # Commit changes with the message "left from last change"
@@ -139,8 +141,12 @@ def run_agent_for_repo(
 
     # write agent_config to .agent.yaml in the log_dir for record
     agent_config_log_file = experiment_log_dir / ".agent.yaml"
-    with open(agent_config_log_file, "w") as agent_config_file:
-        yaml.dump(agent_config, agent_config_file)
+    try:
+        with open(agent_config_log_file, "w") as agent_config_file:
+            yaml.dump(agent_config, agent_config_file)
+    except OSError as e:
+        logger.error("Failed to write agent config to %s: %s", agent_config_log_file, e)
+        raise
 
     message = ""
 
@@ -253,8 +259,12 @@ def run_agent_for_repo(
                         branch, backend, commit0_config_file
                     )
     if agent_config.record_test_for_each_commit:
-        with open(experiment_log_dir / "eval_results.json", "w") as f:
-            json.dump(eval_results, f)
+        try:
+            with open(experiment_log_dir / "eval_results.json", "w") as f:
+                json.dump(eval_results, f)
+        except OSError as e:
+            logger.error("Failed to write eval results: %s", e)
+            raise
 
     if thinking_capture is not None:
         try:
@@ -354,11 +364,11 @@ def run_agent(
         # Install Chrome for Playwright for browser-based agents
         try:
             subprocess.run(["playwright", "install", "chromium"], check=True)
-            print("Chrome installed successfully for Playwright")
+            logger.info("Chrome installed successfully for Playwright")
         except subprocess.CalledProcessError as e:
-            print(f"Error installing Chrome for Playwright: {e}")
+            logger.error("Error installing Chrome for Playwright: %s", e)
         except FileNotFoundError:
-            print("Playwright not found. Make sure it's installed and in your PATH.")
+            logger.warning("Playwright not found. Make sure it's installed and in your PATH.")
 
     with tqdm(
         total=len(filtered_dataset), smoothing=0, desc="Running Aider for repos"

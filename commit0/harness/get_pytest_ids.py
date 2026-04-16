@@ -1,16 +1,24 @@
 import bz2
+import logging
 from typing import List
 import commit0
 import os
 
+logger = logging.getLogger(__name__)
+
 
 def read(bz2_file: str) -> str:
-    with bz2.open(bz2_file, "rt") as f:
-        out = f.read()
-    return out
+    try:
+        with bz2.open(bz2_file, "rt") as f:
+            out = f.read()
+        return out
+    except (OSError, EOFError) as e:
+        logger.error("Failed to read bz2 file %s: %s", bz2_file, e)
+        raise
 
 
 def main(repo: str, verbose: int) -> List[List[str]]:
+    logger.debug("Reading test IDs for repo: %s", repo)
     repo = repo.lower()
     repo = repo.replace(".", "-")
     commit0_path = os.path.dirname(commit0.__file__)
@@ -23,6 +31,7 @@ def main(repo: str, verbose: int) -> List[List[str]]:
     out = [in_file_fail, in_file_pass]
     if verbose:
         print(f"FAIL TO PASS:\n{out[0]}\nPASS TO PASS:\n{out[1]}")
+        logger.info("FAIL TO PASS: %d entries, PASS TO PASS: %d entries", len(out[0].split('\n')), len(out[1].split('\n')))
     out = [
         [x for x in out[0].split("\n") if x],
         [x for x in out[1].split("\n") if x],

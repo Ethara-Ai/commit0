@@ -115,7 +115,8 @@ class Docker(ExecutionContext):
         )
         self.container.start()
         if files_to_copy:
-            for _, f in files_to_copy.items():
+            for key, f in files_to_copy.items():
+                logger.debug("Copying %s to container: %s -> %s", key, f["src"], f["dest"])
                 copy_to_container(self.container, f["src"], f["dest"])  # type: ignore
 
     def exec_run_with_timeout(self, command: str) -> tuple[str, bool, float]:
@@ -257,16 +258,19 @@ class E2B(ExecutionContext):
         # in modal, we create a sandbox for each operation. this seems super slow.
         # let's try having a single sandbox for multiple operations
         # assume the sandbox needs to be alive for an hour, the max duration
+        logger.info("Creating E2B sandbox for %s", spec.repo)
         self.sb = Sandbox(timeout=60 * 60)
+        logger.debug("E2B: running pip install --upgrade pip")
         self.sb.commands.run("pip install --upgrade pip")
 
         # setup sandbox env
+        logger.debug("E2B: writing and running setup.sh")
         self.sb.files.write("setup.sh", spec.setup_script)
         self.sb.commands.run("bash setup.sh")
 
         # prepare for eval
         if files_to_copy:
-            for _, f in files_to_copy.items():
+            for key, f in files_to_copy.items():
                 with open(f["src"], "r") as fp:  # type: ignore
                     content = fp.read()
                     self.sb.files.write(f["dest"].name, content)  # type: ignore

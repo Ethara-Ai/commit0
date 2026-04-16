@@ -1,8 +1,11 @@
 """Write structured output.jsonl for benchmark evaluation."""
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def write_output_jsonl(
@@ -53,8 +56,12 @@ def write_output_jsonl(
     }
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path, "a") as f:
-        f.write(json.dumps(record, default=str) + "\n")
+    try:
+        with open(output_path, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except OSError as e:
+        logger.error("Failed to write output JSONL to %s: %s", output_path, e)
+        raise
 
 
 def extract_git_patch(repo_path: str, base_commit: str) -> str:
@@ -77,7 +84,8 @@ def extract_git_patch(repo_path: str, base_commit: str) -> str:
     repo = git.Repo(repo_path)
     try:
         return repo.git.diff(base_commit, "--", ".")
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to extract git patch from %s at commit %s: %s", repo_path, base_commit, e)
         return ""
 
 

@@ -43,7 +43,8 @@ def extract_function_stubs(file_path: Path) -> List[str]:
 
     try:
         tree = ast.parse(content)
-    except SyntaxError:
+    except SyntaxError as e:
+        logger.debug("SyntaxError parsing %s: %s", file_path, e)
         return []
 
     stubs = []
@@ -268,7 +269,7 @@ def ignore_cycles(graph: dict) -> list[str]:
     try:
         return list(ts.static_order())
     except CycleError as e:
-        # print(f"Cycle detected: {e.args[1]}")
+        logger.debug("Breaking dependency cycle: %s", e.args[1] if e.args else e)
         # You can either break the cycle by modifying the graph or handle it as needed.
         # For now, let's just remove the first node in the cycle and try again.
         cycle_nodes = e.args[1]
@@ -291,7 +292,8 @@ def topological_sort_based_on_dependencies(
         try:
             imports = module_set.get_imports(mod)
             import_dependencies[path] = set([str(x) for x in imports])
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to resolve imports for %s: %s", path, e)
             import_dependencies[path] = set()
 
     import_dependencies_files = ignore_cycles(import_dependencies)
@@ -314,6 +316,9 @@ def get_target_edit_files(
     for file_path in files:
         with open(file_path, "r", encoding="utf-8-sig", errors="ignore") as file:
             content = file.read()
+            if len(content.splitlines()) > 1500:
+                logger.debug("Skipping %s: exceeds 1500 line limit", file_path)
+                continue
             if "    pass" in content:
                 # Verify the file actually has stubs by checking it differs from
                 # the reference commit. Files with only abstract method `pass` or
@@ -324,6 +329,7 @@ def get_target_edit_files(
                     continue
                 filtered_files.append(file_path)
     # Change to reference commit to get the correct dependencies
+    logger.debug("Checking out reference commit %s", reference_commit)
     local_repo.git.checkout(reference_commit)
 
     topological_sort_files, import_dependencies = (
@@ -333,6 +339,7 @@ def get_target_edit_files(
         if len(topological_sort_files) < len(filtered_files):
             # Find the missing elements
             missing_files = set(filtered_files) - set(topological_sort_files)
+            logger.info("Topological sort: %d files, %d files not in dependency graph — appending", len(topological_sort_files), len(missing_files))
             # Add the missing files to the end of the list
             topological_sort_files = topological_sort_files + list(missing_files)
         else:
@@ -456,9 +463,16 @@ def get_message(
         spec_pdf_path = Path(repo_path) / "spec.pdf"
         spec_bz2_path = Path(repo_path) / "spec.pdf.bz2"
         if spec_bz2_path.exists() and not spec_pdf_path.exists():
-            with bz2.open(str(spec_bz2_path), "rb") as in_file:
-                with open(str(spec_pdf_path), "wb") as out_file:
-                    out_file.write(in_file.read())
+            try:
+                with bz2.open(str(spec_bz2_path), "rb") as in_file:
+                    with open(str(spec_pdf_path), "wb") as out_file:
+                        out_file.write(in_file.read())
+            except Exception as e:
+                logger.warning("Failed to decompress spec file %s: %s", spec_bz2_path, e)
+                # Clean up partial file to prevent reading corrupt data
+                if spec_pdf_path.exists():
+                    spec_pdf_path.unlink()
+                spec_info = ""
         if spec_pdf_path.exists():
             raw_spec = get_specification(specification_pdf_path=spec_pdf_path)
             if len(raw_spec) > agent_config.max_spec_info_length:
@@ -487,10 +501,13 @@ def update_message_with_dependencies(message: str, dependencies: list[str]) -> s
         return message
     import_dependencies_info = f"\n{IMPORT_DEPENDENCIES_HEADER}"
     for dependency in dependencies:
-        with open(dependency, "r") as file:
-            import_dependencies_info += (
-                f"\nHere is the content of the file {dependency}:\n{file.read()}"
-            )
+        try:
+            with open(dependency, "r") as file:
+                import_dependencies_info += (
+                    f"\nHere is the content of the file {dependency}:\n{file.read()}"
+                )
+        except FileNotFoundError:
+            logger.warning("Dependency file not found: %s", dependency)
     message += import_dependencies_info
     return message
 
@@ -743,6 +760,7 @@ def create_branch(repo: git.Repo, branch: str, from_commit: str) -> None:
     """
     try:
         # Check if the branch already exists
+        logger.info("Creating/switching to branch '%s' from commit %s", branch, from_commit)
         if branch in repo.heads:
             repo.git.checkout(branch)
         else:
@@ -775,7 +793,7 @@ def get_changed_files_from_commits(
 
         return changed_files
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logger.error("Failed to get changed files between %s and %s: %s", commit1, commit2, e, exc_info=True)
         return []
 
 
@@ -854,6 +872,7 @@ def get_lint_cmd(repo_name: str, use_lint_info: bool, commit0_config_file: str) 
 
 def write_agent_config(agent_config_file: str, agent_config: dict) -> None:
     """Write the agent config to the file."""
+    logger.info("Writing agent config to %s", agent_config_file)
     with open(agent_config_file, "w") as f:
         yaml.dump(agent_config, f)
 

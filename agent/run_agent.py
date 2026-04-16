@@ -1,3 +1,4 @@
+import logging
 import os
 import yaml
 import multiprocessing
@@ -29,6 +30,8 @@ from agent.display import TerminalDisplay
 import queue
 import time
 
+logger = logging.getLogger(__name__)
+
 
 class DirContext:
     def __init__(self, d: str):
@@ -58,7 +61,7 @@ def run_eval_after_each_commit(
         )
         return result.stdout
     except subprocess.CalledProcessError as e:
-        print(f"Error running eval command: {e}")
+        logger.error("Error running eval command: %s", e, exc_info=True)
         return e.stdout if e.stdout else str(e)
 
 
@@ -94,6 +97,7 @@ def run_agent_for_repo(
     try:
         local_repo = Repo(repo_path)
     except Exception:
+        logger.error("Failed to open repo at %s: not a git repo", repo_path, exc_info=True)
         raise Exception(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
@@ -111,6 +115,7 @@ def run_agent_for_repo(
 
     # Check if there are changes in the current branch
     if local_repo.is_dirty():
+        logger.warning("Auto-committing uncommitted changes in %s", repo_path)
         # Stage all changes
         local_repo.git.add(A=True)
         # Commit changes with the message "left from last change"
@@ -125,6 +130,7 @@ def run_agent_for_repo(
     # set it back to commit 0
     latest_commit = local_repo.commit(branch)
     if latest_commit.hexsha != example["base_commit"] and override_previous_changes:
+        logger.warning("Resetting %s to base commit %s (override_previous_changes=True)", repo_name, example["base_commit"])
         local_repo.git.reset("--hard", example["base_commit"])
 
     # get target files to edit and test files to run
@@ -136,6 +142,7 @@ def run_agent_for_repo(
         example["reference_commit"],
         agent_config.use_topo_sort_dependencies,
     )
+    logger.info("Found %d target edit files for %s", len(target_edit_files), repo_name)
 
     lint_files = get_changed_files_from_commits(
         local_repo, "HEAD", example["base_commit"]
@@ -154,12 +161,17 @@ def run_agent_for_repo(
         / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     )
     experiment_log_dir.mkdir(parents=True, exist_ok=True)
+    logger.debug("Experiment log directory: %s", experiment_log_dir)
 
     eval_results = {}
     # write agent_config to .agent.yaml in the log_dir for record
     agent_config_log_file = experiment_log_dir / ".agent.yaml"
-    with open(agent_config_log_file, "w") as agent_config_file:
-        yaml.dump(agent_config, agent_config_file)
+    try:
+        with open(agent_config_log_file, "w") as agent_config_file:
+            yaml.dump(agent_config, agent_config_file)
+    except OSError as e:
+        logger.error("Failed to write agent config to %s: %s", agent_config_log_file, e)
+        raise
 
     with DirContext(repo_path):
         if agent_config is None:
@@ -262,8 +274,12 @@ def run_agent_for_repo(
                     )
                 )
     if agent_config.record_test_for_each_commit:
-        with open(experiment_log_dir / "eval_results.json", "w") as f:
-            json.dump(eval_results, f)
+        try:
+            with open(experiment_log_dir / "eval_results.json", "w") as f:
+                json.dump(eval_results, f)
+        except OSError as e:
+            logger.error("Failed to write eval results to %s: %s", experiment_log_dir / "eval_results.json", e)
+            raise
 
     update_queue.put(("finish_repo", repo_name))
 
@@ -315,11 +331,11 @@ def run_agent(
         # Install Chrome for Playwright for browser-based agents
         try:
             subprocess.run(["playwright", "install", "chromium"], check=True)
-            print("Chrome installed successfully for Playwright")
+            logger.info("Chrome installed successfully for Playwright")
         except subprocess.CalledProcessError as e:
-            print(f"Error installing Chrome for Playwright: {e}")
+            logger.error("Error installing Chrome for Playwright: %s", e)
         except FileNotFoundError:
-            print("Playwright not found. Make sure it's installed and in your PATH.")
+            logger.warning("Playwright not found. Make sure it's installed and in your PATH.")
 
     with TerminalDisplay(len(filtered_dataset)) as display:
         not_started_repos = [
@@ -389,7 +405,7 @@ def run_agent(
                                     repo_name, file_name, money_spent
                                 )
                     except queue.Empty:
-                        pass
+                        logger.debug("Queue empty, waiting for worker updates")
 
                     # Update time display every second
                     current_time = time.time()

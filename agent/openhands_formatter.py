@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import uuid
 from dataclasses import dataclass
@@ -11,6 +12,8 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from agent.thinking_capture import Turn
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -638,5 +641,9 @@ def write_openhands_jsonl(
         stage_runtime_seconds=stage_runtime_seconds,
     )
 
-    with open(path, "a") as f:
-        f.write(json.dumps(record, default=str) + "\n")
+    try:
+        with open(path, "a") as f:
+            f.write(json.dumps(record, default=str) + "\n")
+    except OSError as e:
+        logger.error("Failed to write OpenHands JSONL to %s: %s", path, e)
+        raise
