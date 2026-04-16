@@ -77,7 +77,9 @@ def run_agent_for_repo(
     try:
         local_repo = Repo(repo_path)
     except Exception:
-        logger.error("Failed to open repo at %s: not a git repo", repo_path, exc_info=True)
+        logger.error(
+            "Failed to open repo at %s: not a git repo", repo_path, exc_info=True
+        )
         raise Exception(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
@@ -183,6 +185,9 @@ def run_agent_for_repo(
                     thinking_capture=thinking_capture,
                     current_stage="test",
                     current_module=test_file_name,
+                    max_test_output_length=agent_config.max_test_output_length,
+                    spec_summary_model=agent_config.spec_summary_model,
+                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 _mark_module_done(test_log_dir)
 
@@ -368,7 +373,9 @@ def run_agent(
         except subprocess.CalledProcessError as e:
             logger.error("Error installing Chrome for Playwright: %s", e)
         except FileNotFoundError:
-            logger.warning("Playwright not found. Make sure it's installed and in your PATH.")
+            logger.warning(
+                "Playwright not found. Make sure it's installed and in your PATH."
+            )
 
     with tqdm(
         total=len(filtered_dataset), smoothing=0, desc="Running Aider for repos"

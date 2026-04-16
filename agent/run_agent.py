@@ -97,7 +97,9 @@ def run_agent_for_repo(
     try:
         local_repo = Repo(repo_path)
     except Exception:
-        logger.error("Failed to open repo at %s: not a git repo", repo_path, exc_info=True)
+        logger.error(
+            "Failed to open repo at %s: not a git repo", repo_path, exc_info=True
+        )
         raise Exception(
             f"{repo_path} is not a git repo. Check if base_dir is correctly specified."
         )
@@ -130,7 +132,11 @@ def run_agent_for_repo(
     # set it back to commit 0
     latest_commit = local_repo.commit(branch)
     if latest_commit.hexsha != example["base_commit"] and override_previous_changes:
-        logger.warning("Resetting %s to base commit %s (override_previous_changes=True)", repo_name, example["base_commit"])
+        logger.warning(
+            "Resetting %s to base commit %s (override_previous_changes=True)",
+            repo_name,
+            example["base_commit"],
+        )
         local_repo.git.reset("--hard", example["base_commit"])
 
     # get target files to edit and test files to run
@@ -198,6 +204,9 @@ def run_agent_for_repo(
                     target_edit_files,
                     test_log_dir,
                     test_first=True,
+                    max_test_output_length=agent_config.max_test_output_length,
+                    spec_summary_model=agent_config.spec_summary_model,
+                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
@@ -278,7 +287,11 @@ def run_agent_for_repo(
             with open(experiment_log_dir / "eval_results.json", "w") as f:
                 json.dump(eval_results, f)
         except OSError as e:
-            logger.error("Failed to write eval results to %s: %s", experiment_log_dir / "eval_results.json", e)
+            logger.error(
+                "Failed to write eval results to %s: %s",
+                experiment_log_dir / "eval_results.json",
+                e,
+            )
             raise
 
     update_queue.put(("finish_repo", repo_name))
@@ -335,7 +348,9 @@ def run_agent(
         except subprocess.CalledProcessError as e:
             logger.error("Error installing Chrome for Playwright: %s", e)
         except FileNotFoundError:
-            logger.warning("Playwright not found. Make sure it's installed and in your PATH.")
+            logger.warning(
+                "Playwright not found. Make sure it's installed and in your PATH."
+            )
 
     with TerminalDisplay(len(filtered_dataset)) as display:
         not_started_repos = [

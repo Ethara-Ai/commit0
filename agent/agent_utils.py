@@ -339,7 +339,11 @@ def get_target_edit_files(
         if len(topological_sort_files) < len(filtered_files):
             # Find the missing elements
             missing_files = set(filtered_files) - set(topological_sort_files)
-            logger.info("Topological sort: %d files, %d files not in dependency graph — appending", len(topological_sort_files), len(missing_files))
+            logger.info(
+                "Topological sort: %d files, %d files not in dependency graph — appending",
+                len(topological_sort_files),
+                len(missing_files),
+            )
             # Add the missing files to the end of the list
             topological_sort_files = topological_sort_files + list(missing_files)
         else:
@@ -468,7 +472,9 @@ def get_message(
                     with open(str(spec_pdf_path), "wb") as out_file:
                         out_file.write(in_file.read())
             except Exception as e:
-                logger.warning("Failed to decompress spec file %s: %s", spec_bz2_path, e)
+                logger.warning(
+                    "Failed to decompress spec file %s: %s", spec_bz2_path, e
+                )
                 # Clean up partial file to prevent reading corrupt data
                 if spec_pdf_path.exists():
                     spec_pdf_path.unlink()
@@ -736,6 +742,166 @@ def summarize_specification(
         return spec_text[:max_char_length]
 
 
+_TEST_SUMMARIZER_SYSTEM_PROMPT = (
+    "You are a test output summarizer for an AI coding agent. "
+    "Your job is to compress pytest output while preserving ALL information "
+    "needed to debug test failures.\n\n"
+    "PRESERVE (mandatory, never drop):\n"
+    "- EVERY failed test name and its full traceback.\n"
+    "- Assertion messages with expected vs actual values.\n"
+    "- Collection errors, import errors, fixture errors.\n"
+    "- The short test summary info section.\n"
+    "- The final status line (N failed, M passed, etc.).\n\n"
+    "OMIT (drop first when budget is tight):\n"
+    "- Docker/container setup output (pip install, container lifecycle).\n"
+    "- Passing test details (just keep the count).\n"
+    "- Duplicate traceback frames that appear in both full output and summary.\n"
+    "- Warnings unless they indicate why tests fail.\n"
+    "- Captured stdout/stderr from passing tests.\n\n"
+    "FORMAT: Keep tracebacks as code blocks. Be maximally dense."
+)
+
+
+def _parse_pytest_output(raw: str) -> str:
+    """Tier 1: Deterministic extraction of pytest failure info from raw output.
+
+    Strips Docker preamble, extracts FAILURES section, ERRORS section,
+    short test summary, and final status line.
+    """
+    lines = raw.split("\n")
+
+    # Find the first pytest-like line (test session starts or collection)
+    pytest_start = -1
+    for i, line in enumerate(lines):
+        if "test session starts" in line or line.startswith("collected "):
+            pytest_start = i
+            break
+
+    # Strip Docker preamble
+    if pytest_start > 0:
+        lines = lines[pytest_start:]
+
+    text = "\n".join(lines)
+
+    sections: list[str] = []
+
+    # Extract FAILURES section
+    failures_match = re.search(
+        r"(={3,} FAILURES ={3,}.*?)(?=={3,} (?:warnings|short test summary|ERRORS)|\Z)",
+        text,
+        re.DOTALL,
+    )
+    if failures_match:
+        sections.append(failures_match.group(1).strip())
+
+    # Extract ERRORS section (collection errors)
+    errors_match = re.search(
+        r"(={3,} ERRORS ={3,}.*?)(?=={3,} (?:warnings|short test summary|FAILURES)|\Z)",
+        text,
+        re.DOTALL,
+    )
+    if errors_match:
+        sections.append(errors_match.group(1).strip())
+
+    # Extract short test summary info
+    summary_match = re.search(
+        r"(={3,} short test summary info ={3,}.*?)(?=={3,}[^=]|\Z)",
+        text,
+        re.DOTALL,
+    )
+    if summary_match:
+        sections.append(summary_match.group(1).strip())
+
+    # Extract final status line (e.g., "= 2 failed, 48 passed in 12.34s =")
+    status_match = re.search(r"(={3,}\s+[\d]+ .*? in [\d.]+s\s*={3,})", text)
+    if status_match:
+        sections.append(status_match.group(1).strip())
+
+    if sections:
+        return "\n\n".join(sections)
+
+    # Parse failed — return text with preamble stripped
+    return text
+
+
+def summarize_test_output(
+    raw_output: str,
+    max_length: int = 15000,
+    model: str = "bedrock/us.anthropic.claude-sonnet-4-6-v1",
+    max_tokens: int = 4000,
+) -> str:
+    """Hybrid 3-tier test output summarization.
+
+    Tier 1: Deterministic pytest parsing (free, instant).
+    Tier 2: LLM summarization if Tier 1 exceeds budget.
+    Tier 3: Smart truncation fallback.
+    """
+    if len(raw_output) <= max_length:
+        return raw_output
+
+    # Tier 1: Deterministic parse
+    parsed = _parse_pytest_output(raw_output)
+    if len(parsed) <= max_length:
+        logger.info(
+            "Test output summarized (Tier 1 parse): %d -> %d chars",
+            len(raw_output),
+            len(parsed),
+        )
+        return parsed
+
+    # Tier 2: LLM summarization
+    try:
+        import litellm
+
+        response = litellm.completion(
+            model=model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        _TEST_SUMMARIZER_SYSTEM_PROMPT
+                        + "\n- Your summary MUST be under "
+                        + str(max_length)
+                        + " characters."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": "Summarize this test output:\n\n" + parsed,
+                },
+            ],
+            max_tokens=max_tokens,
+        )
+        content = response.choices[0].message.content  # type: ignore[union-attr]
+        if content:
+            result = content.strip()
+            logger.info(
+                "Test output summarized (Tier 2 LLM): %d -> %d chars (model=%s)",
+                len(raw_output),
+                len(result),
+                model,
+            )
+            return result
+    except Exception:
+        logger.warning(
+            "LLM test summarization failed, falling back to truncation",
+            exc_info=True,
+        )
+
+    # Tier 3: Smart truncation — first 2K + ... + last 2K
+    head = 2000
+    tail = 2000
+    if max_length >= head + tail + 40:
+        truncated = parsed[:head] + "\n\n... [truncated] ...\n\n" + parsed[-tail:]
+        logger.info(
+            "Test output summarized (Tier 3 truncation): %d -> %d chars",
+            len(raw_output),
+            len(truncated),
+        )
+        return truncated
+    return parsed[:max_length]
+
+
 def create_branch(repo: git.Repo, branch: str, from_commit: str) -> None:
     """Create a new branch or switch to an existing branch.
 
@@ -760,7 +926,9 @@ def create_branch(repo: git.Repo, branch: str, from_commit: str) -> None:
     """
     try:
         # Check if the branch already exists
-        logger.info("Creating/switching to branch '%s' from commit %s", branch, from_commit)
+        logger.info(
+            "Creating/switching to branch '%s' from commit %s", branch, from_commit
+        )
         if branch in repo.heads:
             repo.git.checkout(branch)
         else:
@@ -793,7 +961,13 @@ def get_changed_files_from_commits(
 
         return changed_files
     except Exception as e:
-        logger.error("Failed to get changed files between %s and %s: %s", commit1, commit2, e, exc_info=True)
+        logger.error(
+            "Failed to get changed files between %s and %s: %s",
+            commit1,
+            commit2,
+            e,
+            exc_info=True,
+        )
         return []
 
 

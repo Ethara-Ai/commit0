@@ -148,6 +148,10 @@ def config(
         True,
         help="Enable LLM prompt caching to reduce API costs",
     ),
+    max_test_output_length: int = typer.Option(
+        15000,
+        help="Maximum length of test output before summarization (0 to disable)",
+    ),
     pre_commit_config_path: str = typer.Option(
         ".pre-commit-config.yaml",
         help="Path to the pre-commit config file",
@@ -185,6 +189,7 @@ def config(
         "pre_commit_config_path": pre_commit_config_path,
         "record_test_for_each_commit": record_test_for_each_commit,
         "cache_prompts": cache_prompts,
+        "max_test_output_length": max_test_output_length,
     }
 
     write_agent_config(agent_config_file, agent_config)

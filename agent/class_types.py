@@ -27,6 +27,7 @@ class AgentConfig:
     cache_prompts: bool = True
     spec_summary_model: str = "bedrock/us.anthropic.claude-sonnet-4-6-v1"
     spec_summary_max_tokens: int = 4000
+    max_test_output_length: int = 15000
 
     # --- Thinking capture fields ---
     capture_thinking: bool = False  # Whether to capture reasoning tokens
@@ -51,6 +52,7 @@ class AgentConfig:
             "max_unit_tests_info_length",
             "max_spec_info_length",
             "max_lint_info_length",
+            "max_test_output_length",
         ):
             val = getattr(self, field_name)
             if not isinstance(val, int) or val < 0:

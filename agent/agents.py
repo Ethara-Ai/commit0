@@ -10,6 +10,7 @@ import re
 import os
 from typing import Any, Optional
 from agent.thinking_capture import ThinkingCapture
+from agent.agent_utils import summarize_test_output
 
 _logger = logging.getLogger(__name__)
 
@@ -90,7 +91,9 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
                 underlying_model_id = models[0].get("modelId", "")
 
             if not underlying_model_id:
-                _logger.debug("Could not resolve underlying model ID from ARN: %s", model_name)
+                _logger.debug(
+                    "Could not resolve underlying model ID from ARN: %s", model_name
+                )
                 return
 
             from aider.llm import litellm as aider_litellm
@@ -120,7 +123,11 @@ def register_bedrock_arn_pricing(model_name: str) -> None:
                     return
 
     except Exception:
-        _logger.debug("Failed to register Bedrock ARN pricing for model %s", model_name, exc_info=True)
+        _logger.debug(
+            "Failed to register Bedrock ARN pricing for model %s",
+            model_name,
+            exc_info=True,
+        )
 
 
 def handle_logging(logging_name: str, log_file: Path) -> None:
@@ -379,6 +386,9 @@ class AiderAgents(Agents):
         thinking_capture: Optional[ThinkingCapture] = None,
         current_stage: str = "",
         current_module: str = "",
+        max_test_output_length: int = 0,
+        spec_summary_model: str = "",
+        spec_summary_max_tokens: int = 4000,
     ) -> AgentReturn:
         """Start aider agent"""
         if test_cmd:
@@ -431,6 +441,25 @@ class AiderAgents(Agents):
         )
         coder.max_reflections = self.max_iteration
         coder.stream = True
+
+        if max_test_output_length > 0:
+            _original_cmd_test = coder.commands.cmd_test
+            _max_len = max_test_output_length
+            _model = spec_summary_model
+            _max_tok = spec_summary_max_tokens
+
+            def _wrapped_cmd_test(test_cmd_arg: str) -> str:
+                raw = _original_cmd_test(test_cmd_arg)
+                if raw and len(raw) > _max_len:
+                    return summarize_test_output(
+                        raw,
+                        max_length=_max_len,
+                        model=_model,
+                        max_tokens=_max_tok,
+                    )
+                return raw
+
+            coder.commands.cmd_test = _wrapped_cmd_test
 
         if thinking_capture is not None:
             _apply_thinking_capture_patches(

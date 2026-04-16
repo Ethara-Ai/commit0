@@ -49,6 +49,7 @@ INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
 NUM_SAMPLES=1
+MAX_TEST_OUTPUT_LENGTH=15000
 
 print_usage() {
     cat <<'USAGE'
@@ -104,6 +105,7 @@ while [[ $# -gt 0 ]]; do
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
         --skip-to-stage) [[ $# -lt 2 ]] && { echo "Error: --skip-to-stage requires a value"; exit 1; }; SKIP_TO_STAGE="$2"; shift 2 ;;
+        --max-test-output-length) [[ $# -lt 2 ]] && { echo "Error: --max-test-output-length requires a value"; exit 1; }; MAX_TEST_OUTPUT_LENGTH="$2"; shift 2 ;;
         -h|--help)     print_usage ;;
         *)
             echo "Error: Unknown argument '$1'"
@@ -696,6 +698,7 @@ run_tests: ${run_tests}
 max_iteration: ${MAX_ITERATION}
 record_test_for_each_commit: false
 cache_prompts: ${CACHE_PROMPTS}
+max_test_output_length: ${MAX_TEST_OUTPUT_LENGTH}
 capture_thinking: true
 trajectory_md: true
 output_jsonl: true
