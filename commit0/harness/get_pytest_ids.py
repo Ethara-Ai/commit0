@@ -23,7 +23,10 @@ def main(repo: str, verbose: int) -> List[List[str]]:
     out = [in_file_fail, in_file_pass]
     if verbose:
         print(f"FAIL TO PASS:\n{out[0]}\nPASS TO PASS:\n{out[1]}")
-    out = [out[0].split("\n"), out[1].split("\n")]
+    out = [
+        [x for x in out[0].split("\n") if x],
+        [x for x in out[1].split("\n") if x],
+    ]
     return out
 
 

@@ -110,7 +110,7 @@ def main(
         report_file = os.path.join(name, "report.json")
         name = name.split("/")[2]
         test_ids = get_tests(name, verbose=0)
-        test_ids = [xx for x in test_ids for xx in x]
+        test_ids = [xx for x in test_ids for xx in x if xx]
         if not os.path.exists(report_file):
             out.append(
                 {
