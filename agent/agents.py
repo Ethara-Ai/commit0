@@ -411,6 +411,7 @@ class AiderAgents(Agents):
         register_bedrock_arn_pricing(model_name)
         self._load_model_settings()
         self.model = Model(model_name)
+        self.model_name = model_name
         self.cache_prompts = cache_prompts
         # Check if API key is set for the model
         if "bedrock" in model_name:
@@ -458,7 +459,6 @@ class AiderAgents(Agents):
         current_stage: str = "",
         current_module: str = "",
         max_test_output_length: int = 0,
-        spec_summary_model: str = "",
         spec_summary_max_tokens: int = 4000,
     ) -> AgentReturn:
         """Start aider agent"""
@@ -513,7 +513,7 @@ class AiderAgents(Agents):
             if max_test_output_length > 0:
                 _original_cmd_test = coder.commands.cmd_test
                 _max_len = max_test_output_length
-                _model = spec_summary_model
+                _model = self.model_name
                 _max_tok = spec_summary_max_tokens
 
                 def _wrapped_cmd_test(test_cmd_arg: str) -> str:

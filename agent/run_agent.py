@@ -205,7 +205,6 @@ def run_agent_for_repo(
                     test_log_dir,
                     test_first=True,
                     max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_model=agent_config.spec_summary_model,
                     spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 if agent_config.record_test_for_each_commit:

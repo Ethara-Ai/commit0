@@ -116,7 +116,11 @@ def run_agent_for_repo(
     # set it back to commit 0
     latest_commit = local_repo.commit(branch)
     if latest_commit.hexsha != example["base_commit"] and override_previous_changes:
-        logger.warning("Resetting %s to base commit %s (override_previous_changes=True)", repo_name, example["base_commit"])
+        logger.warning(
+            "Resetting %s to base commit %s (override_previous_changes=True)",
+            repo_name,
+            example["base_commit"],
+        )
         local_repo.git.reset("--hard", example["base_commit"])
 
     # get target files to edit and test files to run
@@ -187,7 +191,6 @@ def run_agent_for_repo(
                     current_stage="test",
                     current_module=test_file_name,
                     max_test_output_length=agent_config.max_test_output_length,
-                    spec_summary_model=agent_config.spec_summary_model,
                     spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 _mark_module_done(test_log_dir)
