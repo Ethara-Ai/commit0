@@ -1,7 +1,4 @@
 from datasets import Dataset
-import logging
-
-logger = logging.getLogger(__name__)
 
 submissions = {
     "org_name": [

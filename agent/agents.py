@@ -487,6 +487,10 @@ class AiderAgents(Agents):
                             f"Skipping: message ~{estimated_tokens} tokens exceeds "
                             f"max_input_tokens {max_input} for {fnames}"
                         )
+                        print(
+                            f"WARNING: Skipping {fnames}: ~{estimated_tokens} tokens exceeds max_input_tokens {max_input}",
+                            file=_saved_stderr,
+                        )
                         return AiderReturn(log_file)
                 _logger.info("Running coder for %s", fnames)
                 coder.run(message)
@@ -496,12 +500,12 @@ class AiderAgents(Agents):
                 try:
                     sys.stdout.close()
                 except Exception:
-                    pass
+                    _logger.debug("Failed to close redirected stdout", exc_info=True)
             if sys.stderr is not _saved_stderr:
                 try:
                     sys.stderr.close()
                 except Exception:
-                    pass
+                    _logger.debug("Failed to close redirected stderr", exc_info=True)
             sys.stdout = _saved_stdout
             sys.stderr = _saved_stderr
 

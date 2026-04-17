@@ -58,7 +58,8 @@ def _check_pyright_available() -> bool:
             timeout=60,
         )
         return result.returncode == 0
-    except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
+    except (subprocess.TimeoutExpired, FileNotFoundError, Exception) as e:
+        logger.debug("pyright availability check failed: %s", e)
         return False
 
 
@@ -162,6 +163,7 @@ def main(
         print(lint_result.output)
         logger.error("Lint failed (exit code %d)", e.returncode)
         if lint_result.code_error_count == 0 and lint_result.suppressed_count > 0:
+            logger.info("All %d lint errors were suppressed (third-party/config), exiting 0", lint_result.suppressed_count)
             sys.exit(0)
         sys.exit(e.returncode)
     except FileNotFoundError as e:

@@ -1137,6 +1137,7 @@ def read_yaml_config(config_file: str) -> dict:
             f"Config file '{config_file}' is empty or invalid. "
             f"Expected a YAML mapping, got {type(data).__name__}."
         )
+    logger.debug("Loaded YAML config from %s", config_file)
     return data
 
 
@@ -1150,9 +1151,7 @@ def load_agent_config(config_file: str) -> "AgentConfig":
     valid_fields = {f.name for f in dataclasses.fields(AgentConfig)}
     unknown = set(config.keys()) - valid_fields
     if unknown:
-        import logging
-
-        logging.getLogger(__name__).warning(
+        logger.warning(
             "Unknown keys in '%s' will be ignored: %s", config_file, sorted(unknown)
         )
 
