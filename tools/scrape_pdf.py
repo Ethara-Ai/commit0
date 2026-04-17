@@ -21,6 +21,7 @@ import bz2
 import json
 import logging
 import os
+import re
 import shutil
 from collections import deque
 from pathlib import Path
@@ -65,6 +66,42 @@ CAPTCHA_MARKERS = [
     "Please verify you are a human",
 ]
 
+SOFT_404_MARKERS = [
+    "the page you requested was not found",
+    "this page doesn't exist",
+    "nothing to see here",
+    "the project you requested does not exist",
+    "the page you are looking for could not be found",
+    "this page could not be found",
+    "we couldn't find the page",
+    "the requested page was not found",
+]
+
+SOFT_404_FIRST_LINE_EXACT = frozenset(
+    [
+        "404",
+        "page not found",
+        "not found",
+        "project not found",
+        "404 not found",
+        "404 error",
+        "404 page not found",
+    ]
+)
+
+_SOFT_404_TITLE_RE = re.compile(
+    r"<title[^>]*>\s*"
+    r"(404|page\s+not\s+found|project\s+not\s+found|not\s+found)"
+    r"\s*(?:[|\-\u2014:]|</title>)",
+    re.IGNORECASE,
+)
+_SOFT_404_H1_RE = re.compile(
+    r"<h1[^>]*>\s*"
+    r"(404|page\s+not\s+found|project\s+not\s+found|not\s+found)"
+    r"\s*</h1>",
+    re.IGNORECASE,
+)
+
 FASTAPI_NON_ENGLISH_PREFIXES = frozenset(
     [
         "az",
@@ -106,6 +143,27 @@ def _is_captcha_page(page: Any) -> bool:
     return any(marker.lower() in text_lower for marker in CAPTCHA_MARKERS)
 
 
+def _is_soft_404_page(page: Any) -> bool:
+    """Check if a PDF page contains soft-404 content (short page with 404 markers)."""
+    text = page.get_text("text")
+    text_lower = text.lower().strip()
+    if len(text_lower) > 500:
+        return False
+    if any(marker in text_lower for marker in SOFT_404_MARKERS):
+        return True
+    first_line = text_lower.split("\n")[0].strip().rstrip(".!:;, ")
+    return first_line in SOFT_404_FIRST_LINE_EXACT
+
+
+def _is_soft_404_content(html: str) -> bool:
+    """Check if raw HTML content indicates a soft-404 (HTTP 200 with not-found body)."""
+    if _SOFT_404_TITLE_RE.search(html):
+        return True
+    if _SOFT_404_H1_RE.search(html):
+        return True
+    return False
+
+
 def _remove_blank_pages(pdf_path: str) -> None:
     document = fitz.open(pdf_path)
     if document.page_count < 2:
@@ -114,6 +172,7 @@ def _remove_blank_pages(pdf_path: str) -> None:
 
     output_document = fitz.open()
     removed_captcha = 0
+    removed_soft_404 = 0
     for i in range(document.page_count):
         page = document.load_page(i)
         if _is_page_blank(page):
@@ -121,12 +180,17 @@ def _remove_blank_pages(pdf_path: str) -> None:
         if _is_captcha_page(page):
             removed_captcha += 1
             continue
+        if _is_soft_404_page(page):
+            removed_soft_404 += 1
+            continue
         output_document.insert_pdf(document, from_page=i, to_page=i)
 
     if removed_captcha:
         logger.info(
             "  Removed %d captcha/bot-check page(s) from %s", removed_captcha, pdf_path
         )
+    if removed_soft_404:
+        logger.info("  Removed %d soft-404 page(s) from %s", removed_soft_404, pdf_path)
 
     output_document.save(pdf_path)
     output_document.close()
@@ -206,12 +270,18 @@ def _generate_pdf(page: Any, url: str, output_dir: str) -> str:
     pdf_path = ""
     try:
         try:
-            page.goto(url, wait_until="networkidle", timeout=30000)
+            response = page.goto(url, wait_until="networkidle", timeout=30000)
         except Exception:
             logger.debug(
                 "  networkidle timeout for %s, retrying with domcontentloaded", url
             )
-            page.goto(url, wait_until="domcontentloaded", timeout=15000)
+            response = page.goto(url, wait_until="domcontentloaded", timeout=15000)
+
+        if response and response.status >= 400:
+            logger.debug(
+                "  HTTP %d generating PDF for %s, skipping", response.status, url
+            )
+            return pdf_path
 
         out_name = f"{urlparse(url).path.replace('/', '_').strip('_')}.pdf"
         if out_name == ".pdf":
@@ -255,11 +325,16 @@ def _crawl_website(
             response = page.goto(
                 current_url, wait_until="domcontentloaded", timeout=30000
             )
-            if response and response.status == 404:
-                logger.debug("  404: %s", current_url)
+            if response and response.status >= 400:
+                logger.debug("  HTTP %d: %s", response.status, current_url)
                 continue
 
             content = page.content()
+
+            if _is_soft_404_content(content):
+                logger.info("  Soft-404 detected, skipping: %s", current_url)
+                continue
+
             soup = BeautifulSoup(content, "html.parser")
 
             for link in soup.find_all("a", href=True):

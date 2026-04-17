@@ -503,6 +503,19 @@ def get_message(
             spec_info = f"\n{SPEC_INFO_HEADER} " + processed_spec
         else:
             spec_info = ""
+            for readme_name in ["README.md", "README.rst", "README.txt", "README"]:
+                readme_path = Path(repo_path) / readme_name
+                if readme_path.exists():
+                    try:
+                        readme_text = readme_path.read_text(errors="replace")
+                        readme_text = readme_text[: agent_config.max_spec_info_length]
+                        spec_info = f"\n{SPEC_INFO_HEADER} " + readme_text
+                        logger.info(
+                            "Using %s as spec fallback for %s", readme_name, repo_path
+                        )
+                        break
+                    except Exception as e:
+                        logger.warning("Failed to read %s: %s", readme_path, e)
     else:
         spec_info = ""
 

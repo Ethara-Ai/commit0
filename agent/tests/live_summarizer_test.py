@@ -5,6 +5,7 @@ Requires env vars:
   AWS_BEARER_TOKEN_BEDROCK
   AWS_DEFAULT_REGION (default: ap-south-1)
 """
+
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ MODEL = os.environ.get(
     "SPEC_SUMMARY_MODEL",
     "bedrock/converse/arn:aws:bedrock:ap-south-1:426628337772:application-inference-profile/zk5ylvw87ngi",
 )
-BUDGET = 10_000   # default max_char_length
+BUDGET = 10_000  # default max_char_length
 
 
 # ── Synthetic spec generator ──────────────────────────────────────────────────
@@ -105,15 +106,16 @@ violating its type hints. The exception message includes:
 
 # ── Test runners ──────────────────────────────────────────────────────────────
 
+
 def test_single_pass(size: int = 25_000, budget: int = BUDGET):
     """Test single-pass summarization (spec < 300K)."""
     spec = _make_spec(size)
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"TEST: Single-pass | input={len(spec):,} chars | budget={budget:,}")
-    print(f"{'='*70}")
-    
+    print(f"{'=' * 70}")
+
     t0 = time.time()
-    result = summarize_specification(
+    result, _costs = summarize_specification(
         spec_text=spec,
         model=MODEL,
         max_tokens=4000,
@@ -121,13 +123,15 @@ def test_single_pass(size: int = 25_000, budget: int = BUDGET):
         timeout=120,
     )
     elapsed = time.time() - t0
-    
+
     print(f"  Output:  {len(result):,} chars")
-    print(f"  Ratio:   {len(spec)/len(result):.1f}x compression")
-    print(f"  Budget:  {'✅ UNDER' if len(result) <= budget else '❌ OVER'} ({len(result):,} / {budget:,})")
+    print(f"  Ratio:   {len(spec) / len(result):.1f}x compression")
+    print(
+        f"  Budget:  {'✅ UNDER' if len(result) <= budget else '❌ OVER'} ({len(result):,} / {budget:,})"
+    )
     print(f"  Time:    {elapsed:.1f}s")
     print(f"  Preview: {result[:200]}...")
-    
+
     assert len(result) <= budget * 1.1, f"Over budget: {len(result)} > {budget}"
     assert len(result) > 100, f"Suspiciously short: {len(result)} chars"
     return result
@@ -137,12 +141,14 @@ def test_chunked(size: int = 700_000, budget: int = BUDGET):
     """Test chunked path (spec > 300K, triggers split + parallel)."""
     spec = _make_spec(size)
     chunks = _chunk_text(spec, 300_000)
-    print(f"\n{'='*70}")
-    print(f"TEST: Chunked ({len(chunks)} chunks) | input={len(spec):,} chars | budget={budget:,}")
-    print(f"{'='*70}")
-    
+    print(f"\n{'=' * 70}")
+    print(
+        f"TEST: Chunked ({len(chunks)} chunks) | input={len(spec):,} chars | budget={budget:,}"
+    )
+    print(f"{'=' * 70}")
+
     t0 = time.time()
-    result = summarize_specification(
+    result, _costs = summarize_specification(
         spec_text=spec,
         model=MODEL,
         max_tokens=4000,
@@ -150,13 +156,15 @@ def test_chunked(size: int = 700_000, budget: int = BUDGET):
         timeout=120,
     )
     elapsed = time.time() - t0
-    
+
     print(f"  Output:  {len(result):,} chars")
-    print(f"  Ratio:   {len(spec)/len(result):.1f}x compression")
-    print(f"  Budget:  {'✅ UNDER' if len(result) <= budget else '❌ OVER'} ({len(result):,} / {budget:,})")
-    print(f"  Time:    {elapsed:.1f}s ({elapsed/len(chunks):.1f}s/chunk)")
+    print(f"  Ratio:   {len(spec) / len(result):.1f}x compression")
+    print(
+        f"  Budget:  {'✅ UNDER' if len(result) <= budget else '❌ OVER'} ({len(result):,} / {budget:,})"
+    )
+    print(f"  Time:    {elapsed:.1f}s ({elapsed / len(chunks):.1f}s/chunk)")
     print(f"  Preview: {result[:200]}...")
-    
+
     assert len(result) > 100, f"Suspiciously short: {len(result)} chars"
     return result
 
@@ -164,17 +172,17 @@ def test_chunked(size: int = 700_000, budget: int = BUDGET):
 def test_caching():
     """Test that caching works — second call should be instant."""
     spec = _make_spec(20_000)
-    
+
     with tempfile.TemporaryDirectory() as tmpdir:
         cache_path = Path(tmpdir) / ".spec_summary_cache.json"
-        
-        print(f"\n{'='*70}")
+
+        print(f"\n{'=' * 70}")
         print(f"TEST: Caching | input={len(spec):,} chars")
-        print(f"{'='*70}")
-        
+        print(f"{'=' * 70}")
+
         # First call — cache miss
         t0 = time.time()
-        result1 = summarize_specification(
+        result1, _costs1 = summarize_specification(
             spec_text=spec,
             model=MODEL,
             max_tokens=4000,
@@ -184,14 +192,35 @@ def test_caching():
         )
         elapsed1 = time.time() - t0
         print(f"  Call 1:  {len(result1):,} chars in {elapsed1:.1f}s (cache miss)")
-        
+
         assert cache_path.exists(), "Cache file not created!"
         cached = json.loads(cache_path.read_text())
-        print(f"  Cache:   ✅ written ({len(cached['summary']):,} chars, hash={cached['hash'][:12]}...)")
-        
+        print(
+            f"  Cache:   ✅ written ({len(cached['summary']):,} chars, hash={cached['hash'][:12]}...)"
+        )
+
         # Second call — cache hit (should be instant)
         t1 = time.time()
-        result2 = summarize_specification(
+        result2, _costs2 = summarize_specification(
+            spec_text=spec,
+            model=MODEL,
+            max_tokens=4000,
+            max_char_length=BUDGET,
+            timeout=120,
+            cache_path=cache_path,
+        )
+        elapsed1 = time.time() - t0
+        print(f"  Call 1:  {len(result1):,} chars in {elapsed1:.1f}s (cache miss)")
+
+        assert cache_path.exists(), "Cache file not created!"
+        cached = json.loads(cache_path.read_text())
+        print(
+            f"  Cache:   ✅ written ({len(cached['summary']):,} chars, hash={cached['hash'][:12]}...)"
+        )
+
+        # Second call — cache hit (should be instant)
+        t1 = time.time()
+        result2, _costs2 = summarize_specification(
             spec_text=spec,
             model=MODEL,
             max_tokens=4000,
@@ -201,12 +230,12 @@ def test_caching():
         )
         elapsed2 = time.time() - t1
         print(f"  Call 2:  {len(result2):,} chars in {elapsed2:.4f}s (cache hit)")
-        
+
         assert result1 == result2, "Cache returned different result!"
         assert elapsed2 < 0.1, f"Cache hit too slow: {elapsed2:.2f}s"
         print(f"  Match:   ✅ identical output")
-        print(f"  Speedup: {elapsed1/max(elapsed2, 0.001):.0f}x")
-        
+        print(f"  Speedup: {elapsed1 / max(elapsed2, 0.001):.0f}x")
+
     return result1
 
 
@@ -226,15 +255,15 @@ if __name__ == "__main__":
     # Verify credentials
     bearer = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
     region = os.environ.get("AWS_DEFAULT_REGION", "ap-south-1")
-    
+
     if not bearer:
         print("ERROR: Set AWS_BEARER_TOKEN_BEDROCK")
         sys.exit(1)
-    
+
     print(f"Model:  {MODEL}")
     print(f"Region: {region}")
     print(f"Auth:   Bearer token ({len(bearer)} chars)")
-    
+
     results = {}
     tests = [
         ("single_pass_25K", lambda: test_single_pass(25_000)),
@@ -243,7 +272,7 @@ if __name__ == "__main__":
         ("chunked_700K", lambda: test_chunked(700_000)),
         ("caching", test_caching),
     ]
-    
+
     passed = 0
     failed = 0
     for name, fn in tests:
@@ -255,15 +284,16 @@ if __name__ == "__main__":
             results[name] = {"status": "FAIL", "error": str(e)}
             failed += 1
             import traceback
+
             traceback.print_exc()
-    
+
     # Summary
-    print(f"\n{'='*70}")
+    print(f"\n{'=' * 70}")
     print(f"SUMMARY: {passed} passed, {failed} failed out of {len(tests)}")
-    print(f"{'='*70}")
+    print(f"{'=' * 70}")
     for name, r in results.items():
         status = "✅" if r["status"] == "PASS" else "❌"
-        detail = f'{r["length"]:,} chars' if "length" in r else r.get("error", "")
+        detail = f"{r['length']:,} chars" if "length" in r else r.get("error", "")
         print(f"  {status} {name:25s} {detail}")
-    
+
     sys.exit(1 if failed else 0)

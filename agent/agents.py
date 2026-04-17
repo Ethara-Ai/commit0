@@ -525,6 +525,11 @@ class AiderAgents(Agents):
             )
             coder.max_reflections = self.max_iteration
             coder.stream = True
+            coder.gpt_prompts.main_system += (
+                "\n\nNEVER edit test files. Test files are read-only reference material."
+                " If a test file is provided, use it only to understand expected behavior."
+                " Only modify implementation/source files to make the tests pass."
+            )
 
             _test_summarizer_costs: list[SummarizerCost] = []
 
