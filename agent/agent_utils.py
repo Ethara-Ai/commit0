@@ -490,7 +490,7 @@ def get_message(
             if len(raw_spec) > int(agent_config.max_spec_info_length * 1.5):
                 processed_spec = summarize_specification(
                     spec_text=raw_spec,
-                    model=agent_config.spec_summary_model,
+                    model=agent_config.model_name,
                     max_tokens=agent_config.spec_summary_max_tokens,
                     max_char_length=agent_config.max_spec_info_length,
                     cache_path=spec_pdf_path.parent / ".spec_summary_cache.json",
@@ -645,7 +645,7 @@ def _summarize_single(
 
 def summarize_specification(
     spec_text: str,
-    model: str = "bedrock/us.anthropic.claude-sonnet-4-6-v1",
+    model: str,
     max_tokens: int = 4000,
     max_char_length: int = 10000,
     timeout: float = 120,
@@ -900,7 +900,7 @@ def _parse_pytest_output(raw: str) -> str:
 def summarize_test_output(
     raw_output: str,
     max_length: int = 15000,
-    model: str = "bedrock/us.anthropic.claude-sonnet-4-6-v1",
+    model: str = "",
     max_tokens: int = 4000,
 ) -> str:
     """Hybrid 3-tier test output summarization.

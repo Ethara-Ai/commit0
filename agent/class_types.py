@@ -25,7 +25,6 @@ class AgentConfig:
     max_iteration: int
     record_test_for_each_commit: bool
     cache_prompts: bool = True
-    spec_summary_model: str = "bedrock/us.anthropic.claude-sonnet-4-6-v1"
     spec_summary_max_tokens: int = 4000
     max_test_output_length: int = 15000
 
