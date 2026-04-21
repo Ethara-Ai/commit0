@@ -247,14 +247,28 @@ def main(
         num_passed = 0
         total_duration = 0.0
         status_counter: Counter[str] = Counter()
+        per_test_results: list[tuple[str, str, float]] = []
         for tid in test_ids_flat:
             if tid in results:
-                status_counter[results[tid].value] += 1
-                if results[tid].value == "PASSED":
+                status = results[tid].value
+                status_counter[status] += 1
+                if status == "PASSED":
                     num_passed += 1
-                total_duration += durations.get(tid, 0.0)
+                dur = durations.get(tid, 0.0)
+                total_duration += dur
+                per_test_results.append((tid, status, dur))
             else:
                 status_counter["FAILED"] += 1
+                per_test_results.append((tid, "FAILED", 0.0))
+
+        print(f"\n--- {repo_label}: Individual Test Results ---")
+        for tid, status, dur in sorted(per_test_results, key=lambda x: x[1]):
+            dur_str = f" ({dur:.3f}s)" if dur > 0 else ""
+            print(f"  {status:>7s}  {tid}{dur_str}")
+        if status_counter:
+            parts = [f"{v} {k.lower()}" for k, v in sorted(status_counter.items())]
+            print(f"  Summary: {', '.join(parts)}")
+        print()
 
         total_tests = len(test_ids_flat) if test_ids_flat else len(results)
         pass_rate = num_passed / total_tests if total_tests > 0 else 0.0

@@ -54,11 +54,49 @@ def _find_docker_image(repo_name: str) -> str | None:
         return None
 
 
-def _parse_go_test_list(stdout: str, module_path: str = "") -> list[str]:
-    """Parse `go test -list .` output into test IDs.
+def _parse_go_test_list_json(stdout: str) -> list[str]:
+    """Parse `go test -list . -json` output into test IDs.
 
-    Go test -list outputs test function names, one per line, possibly prefixed
-    by the package import path when run with ./... pattern.
+    Each JSON line has Package and Output fields. Output events contain test
+    function names (one per line). The Package field is always correct,
+    avoiding the sequencing bug in plain-text parsing where test names
+    appear before their package summary line.
+
+    Returns test IDs in format: package/TestName
+    """
+    test_ids: list[str] = []
+
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if event.get("Action") != "output":
+            continue
+
+        package = event.get("Package", "")
+        output = event.get("Output", "").strip()
+        if not output or not package:
+            continue
+
+        # Match test/example/fuzz names; skip Benchmark (eval doesn't run -bench)
+        if re.match(r"^(Test|Example|Fuzz)\w+$", output):
+            test_ids.append(f"{package}/{output}")
+
+    return test_ids
+
+
+def _parse_go_test_list_plain(stdout: str, module_path: str = "") -> list[str]:
+    """Fallback parser for plain `go test -list .` output (non-JSON).
+
+    WARNING: This parser has a known sequencing issue — test names appear
+    BEFORE their package summary line, so tests may be assigned to the
+    wrong package when multiple packages are listed. Use _parse_go_test_list_json
+    whenever possible.
 
     Returns test IDs in format: package/TestName
     """
@@ -79,7 +117,7 @@ def _parse_go_test_list(stdout: str, module_path: str = "") -> list[str]:
         if line.startswith("FAIL") or line.startswith("#"):
             continue
 
-        if re.match(r"^(Test|Benchmark|Example|Fuzz)\w+", line):
+        if re.match(r"^(Test|Example|Fuzz)\w+", line):
             test_name = line.split()[0]
             if current_package:
                 test_ids.append(f"{current_package}/{test_name}")
@@ -108,9 +146,7 @@ def collect_test_ids_local(
     timeout: int = 300,
 ) -> list[str]:
     """Run `go test -list .` locally to discover Go test names."""
-    module_path = _get_module_path(repo_dir)
-
-    cmd = ["go", "test", "-list", ".", "-count=1", "./..."]
+    cmd = ["go", "test", "-list", ".", "-json", "-count=1", "./..."]
     try:
         result = subprocess.run(
             cmd,
@@ -124,7 +160,26 @@ def collect_test_ids_local(
         return []
 
     combined = result.stdout + "\n" + result.stderr
-    return _parse_go_test_list(combined, module_path)
+    test_ids = _parse_go_test_list_json(combined)
+
+    if not test_ids:
+        logger.info("  JSON parsing found 0 IDs, trying plain-text fallback")
+        module_path = _get_module_path(repo_dir)
+        cmd_plain = ["go", "test", "-list", ".", "-count=1", "./..."]
+        try:
+            result_plain = subprocess.run(
+                cmd_plain,
+                cwd=repo_dir,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            return []
+        combined_plain = result_plain.stdout + "\n" + result_plain.stderr
+        test_ids = _parse_go_test_list_plain(combined_plain, module_path)
+
+    return test_ids
 
 
 def collect_test_ids_docker(
@@ -140,7 +195,9 @@ def collect_test_ids_docker(
     checkout = f"git checkout {reference_commit} -- . && " if reference_commit else ""
 
     client = docker.from_env()
-    bash_cmd = f"cd /testbed && {checkout}go test -list . -count=1 ./... 2>&1; true"
+    bash_cmd = (
+        f"cd /testbed && {checkout}go test -list . -json -count=1 ./... 2>&1; true"
+    )
 
     try:
         raw = client.containers.run(
@@ -163,7 +220,30 @@ def collect_test_ids_docker(
         logger.warning("  Docker go test -list timed out after %ds", timeout)
         return []
 
-    return _parse_go_test_list(stdout)
+    test_ids = _parse_go_test_list_json(stdout)
+
+    if not test_ids:
+        logger.info("  JSON parsing found 0 IDs in Docker, trying plain-text fallback")
+        bash_cmd_plain = (
+            f"cd /testbed && {checkout}go test -list . -count=1 ./... 2>&1; true"
+        )
+        try:
+            raw_plain = client.containers.run(
+                image_name,
+                command=f"bash -c '{bash_cmd_plain}'",
+                remove=True,
+                platform=get_docker_platform(),
+            )
+            stdout_plain = (
+                raw_plain.decode("utf-8", errors="replace")
+                if isinstance(raw_plain, bytes)
+                else raw_plain
+            )
+        except (docker.errors.ContainerError, requests.exceptions.ReadTimeout):
+            return []
+        test_ids = _parse_go_test_list_plain(stdout_plain)
+
+    return test_ids
 
 
 def save_test_ids(
