@@ -32,6 +32,10 @@ from agent.agent_utils_go import (
 )
 from agent.class_types import AgentConfig
 from agent.display import TerminalDisplay
+from agent.thinking_capture import ThinkingCapture
+from agent.trajectory_writer import write_trajectory_md
+from agent.output_writer import write_output_jsonl, extract_git_patch, build_metadata
+from agent.openhands_formatter import write_module_output_json
 from commit0.harness.constants import RepoInstance
 from commit0.harness.constants_go import (
     GO_SPLIT,
@@ -66,6 +70,15 @@ class DirContext:
         exctb: Optional[TracebackType],
     ) -> None:
         os.chdir(self.cwd)
+
+
+def _is_module_done(log_dir: Path) -> bool:
+    return (log_dir / ".done").exists()
+
+
+def _mark_module_done(log_dir: Path) -> None:
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / ".done").touch()
 
 
 def run_eval_after_each_commit(
@@ -138,6 +151,8 @@ def run_agent_for_repo(
     target_edit_files = get_target_edit_files(
         repo_path, src_dir, branch, reference_commit
     )
+    # Convert to relative paths for consistent log directory naming
+    target_edit_files_rel = [os.path.relpath(f, repo_path) for f in target_edit_files]
     test_files = collect_go_test_files(repo_path)
     logger.info("Found %d target edit files for %s", len(target_edit_files), repo_name)
 
@@ -152,6 +167,9 @@ def run_agent_for_repo(
     experiment_log_dir.mkdir(parents=True, exist_ok=True)
 
     eval_results = {}
+    thinking_capture: Optional[ThinkingCapture] = None
+    if agent_config.capture_thinking:
+        thinking_capture = ThinkingCapture()
 
     agent_config_log_file = experiment_log_dir / ".agent.go.yaml"
     try:
@@ -169,8 +187,14 @@ def run_agent_for_repo(
                     continue
                 update_queue.put(("set_current_file", (repo_name, test_id)))
                 test_cmd = f"{sys.executable} commit0/cli_go.py test {repo_path} {test_id} --branch {branch} --backend {backend} --commit0-config-file {commit0_config_file} --timeout 100"
-                test_id_safe = test_id.replace("/", "__").replace(".", "_")
+                short_test_id = (
+                    test_id.rsplit("/", 1)[-1] if "/" in test_id else test_id
+                )
+                test_id_safe = short_test_id.replace("/", "__").replace(".", "_")
                 test_log_dir = experiment_log_dir / test_id_safe
+                if _is_module_done(test_log_dir):
+                    logger.info("Skipping %s (already done)", test_id_safe)
+                    continue
                 lint_cmd = (
                     get_go_lint_cmd(
                         _read_commit0_go_config(commit0_config_file).get(
@@ -196,8 +220,13 @@ def run_agent_for_repo(
                     test_cmd,
                     lint_cmd,
                     target_edit_files,
-                    str(test_log_dir),
+                    test_log_dir,
                     test_first=True,
+                    thinking_capture=thinking_capture,
+                    current_stage="test",
+                    current_module=test_id_safe,
+                    max_test_output_length=agent_config.max_test_output_length,
+                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
@@ -211,6 +240,7 @@ def run_agent_for_repo(
                         (repo_name, test_id, agent_return.last_cost),
                     )
                 )
+                _mark_module_done(test_log_dir)
         elif agent_config.run_entire_dir_lint:
             lint_cmd = get_go_lint_cmd(
                 _read_commit0_go_config(commit0_config_file).get("dataset_name", ""),
@@ -220,19 +250,29 @@ def run_agent_for_repo(
                 repo_name,
                 repo_base_dir,
             )
-            update_queue.put(("start_repo", (repo_name, len(target_edit_files))))
-            for edit_file in target_edit_files:
-                update_queue.put(("set_current_file", (repo_name, edit_file)))
-                file_name = edit_file.replace(".go", "").replace("/", "__")
+            update_queue.put(("start_repo", (repo_name, len(target_edit_files_rel))))
+            for edit_file, edit_file_rel in zip(
+                target_edit_files, target_edit_files_rel
+            ):
+                update_queue.put(("set_current_file", (repo_name, edit_file_rel)))
+                file_name = edit_file_rel.replace(".go", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / file_name
+                if _is_module_done(lint_log_dir):
+                    logger.info("Skipping %s (already done)", file_name)
+                    continue
 
                 agent_return = agent.run(
                     "",
                     "",
                     lint_cmd,
                     [edit_file],
-                    str(lint_log_dir),
+                    lint_log_dir,
                     lint_first=True,
+                    thinking_capture=thinking_capture,
+                    current_stage="lint",
+                    current_module=file_name,
+                    max_test_output_length=agent_config.max_test_output_length,
+                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
                 )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
@@ -246,6 +286,7 @@ def run_agent_for_repo(
                         (repo_name, edit_file, agent_return.last_cost),
                     )
                 )
+                _mark_module_done(lint_log_dir)
         else:
             message = get_go_message(
                 agent_config,
@@ -253,11 +294,14 @@ def run_agent_for_repo(
                 test_files,
             )
 
-            update_queue.put(("start_repo", (repo_name, len(target_edit_files))))
-            for f in target_edit_files:
-                update_queue.put(("set_current_file", (repo_name, f)))
-                file_name = f.replace(".go", "").replace("/", "__")
+            update_queue.put(("start_repo", (repo_name, len(target_edit_files_rel))))
+            for f, f_rel in zip(target_edit_files, target_edit_files_rel):
+                update_queue.put(("set_current_file", (repo_name, f_rel)))
+                file_name = f_rel.replace(".go", "").replace("/", "__")
                 file_log_dir = experiment_log_dir / file_name
+                if _is_module_done(file_log_dir):
+                    logger.info("Skipping %s (already done)", file_name)
+                    continue
                 lint_cmd = (
                     get_go_lint_cmd(
                         _read_commit0_go_config(commit0_config_file).get(
@@ -272,7 +316,18 @@ def run_agent_for_repo(
                     if agent_config.use_lint_info
                     else ""
                 )
-                agent_return = agent.run(message, "", lint_cmd, [f], str(file_log_dir))
+                agent_return = agent.run(
+                    message,
+                    "",
+                    lint_cmd,
+                    [f],
+                    file_log_dir,
+                    thinking_capture=thinking_capture,
+                    current_stage="draft",
+                    current_module=file_name,
+                    max_test_output_length=agent_config.max_test_output_length,
+                    spec_summary_max_tokens=agent_config.spec_summary_max_tokens,
+                )
                 if agent_config.record_test_for_each_commit:
                     current_commit = local_repo.head.commit.hexsha
                     eval_results[current_commit] = run_eval_after_each_commit(
@@ -285,6 +340,7 @@ def run_agent_for_repo(
                         (repo_name, f, agent_return.last_cost),
                     )
                 )
+                _mark_module_done(file_log_dir)
 
     if agent_config.record_test_for_each_commit:
         try:
@@ -297,6 +353,61 @@ def run_agent_for_repo(
                 e,
             )
             raise
+
+    if thinking_capture is not None:
+        if agent_config.trajectory_md:
+            traj_path = experiment_log_dir / "trajectory.md"
+            try:
+                write_trajectory_md(traj_path, repo_name, thinking_capture.turns)
+            except Exception as e:
+                logger.warning("Failed to write trajectory.md: %s", e)
+
+        if agent_config.output_jsonl:
+            git_patch = extract_git_patch(repo_path, example.get("base_commit", "HEAD"))
+            metadata = build_metadata(
+                dataset_path=commit0_config_file,
+                max_iterations=agent_config.max_iteration,
+                model_short=getattr(
+                    agent_config, "model_short", agent_config.model_name
+                ),
+            )
+            try:
+                write_output_jsonl(
+                    output_path=experiment_log_dir / "output.jsonl",
+                    instance_id=example.get("instance_id", repo_name),
+                    instruction="",
+                    git_patch=git_patch,
+                    events=thinking_capture.to_history(),
+                    metrics=thinking_capture.get_metrics(),
+                    metadata=metadata,
+                )
+            except Exception as e:
+                logger.warning("Failed to write output.jsonl: %s", e)
+
+            modules_seen: set[str] = set()
+            for turn in thinking_capture.turns:
+                if turn.module and turn.module not in modules_seen:
+                    modules_seen.add(turn.module)
+            for module_name in modules_seen:
+                module_turns = thinking_capture.get_module_turns(module_name)
+                module_metrics = thinking_capture.get_module_metrics(module_name)
+                stage = module_turns[0].stage if module_turns else "unknown"
+                try:
+                    write_module_output_json(
+                        output_dir=str(experiment_log_dir),
+                        module_turns=module_turns,
+                        module=module_name,
+                        instance_id=example.get("instance_id", repo_name),
+                        git_patch=git_patch,
+                        instruction="",
+                        metadata=metadata,
+                        metrics=module_metrics,
+                        stage=stage,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Failed to write module output JSON for %s: %s", module_name, e
+                    )
 
     update_queue.put(("finish_repo", repo_name))
 

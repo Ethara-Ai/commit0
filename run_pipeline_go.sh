@@ -277,7 +277,7 @@ set_sample_vars 1
 preflight() {
     local errors=0
 
-    for cmd in jq bc; do
+    for cmd in jq bc timeout; do
         if ! command -v "$cmd" &>/dev/null; then
             echo "Error: Required command '$cmd' not found"
             errors=$((errors + 1))

@@ -3,7 +3,6 @@
 import git
 import logging
 import os
-import sys
 import traceback
 from pathlib import Path
 
@@ -46,7 +45,7 @@ def main(
     num_cpus: int,
     rebuild_image: bool,
     verbose: int,
-) -> None:
+) -> int:
 
     dataset = load_dataset_from_config(dataset_name, split=dataset_split)
     dataset_name = dataset_name.lower()
@@ -59,8 +58,8 @@ def main(
         if repo_or_repo_dir.endswith("/"):
             repo_or_repo_dir = repo_or_repo_dir[:-1]
         repo_name = example["repo"].split("/")[-1]
-        if repo_name in os.path.basename(repo_or_repo_dir) or repo_or_repo_dir.endswith(
-            repo_name
+        if repo_name == os.path.basename(repo_or_repo_dir) or repo_or_repo_dir.endswith(
+            "/" + repo_name
         ):
             spec = make_go_spec(example, absolute=absolute)
             break
@@ -86,6 +85,7 @@ def main(
         logger.error(f"{repo_or_repo_dir} is not a git dir, trying {repo_dir} again")
         try:
             local_repo = git.Repo(repo_dir)
+            repo_or_repo_dir = repo_dir
             logger.info(f"Retried succeeded. Loaded a git repo from {repo_dir}")
         except git.exc.NoSuchPathError as e:  # type: ignore
             raise Exception(
@@ -206,10 +206,10 @@ def main(
         _module_logger.debug("Reading go test exit code from %s", go_exit_code_file)
         if go_exit_code_file.exists():
             go_exit_code = int(go_exit_code_file.read_text().strip())
-            sys.exit(go_exit_code)
+            return go_exit_code
         else:
             _module_logger.warning("go_test_exit_code.txt not found, assuming failure")
-            sys.exit(1)
+            return 1
     except EvaluationError as e:
         error_msg = (
             f"Error in running Go tests for {repo_name}: {e}\n"

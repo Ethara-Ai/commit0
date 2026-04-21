@@ -143,7 +143,7 @@ def main(
 
         log_dir = RUN_GO_TEST_LOG_DIR / repo_name / repo_branch / hashed_test_ids
         log_dirs.append(str(log_dir))
-        triples.append((example["instance_id"], test_dir, repo_branch))
+        triples.append((os.path.join(base_dir, repo_name), test_dir, repo_branch))
         specs.append(make_go_spec(example, absolute=True))
 
     if not triples:
@@ -196,13 +196,12 @@ def main(
                 pbar.update(1)
                 repo_name = futures[future]
                 try:
-                    future.result()
-                except SystemExit as e:
-                    if e.code not in (0, 1):
+                    exit_code = future.result()
+                    if exit_code not in (0, 1):
                         logger.warning(
                             "Evaluation for %s exited with code %s",
                             repo_name,
-                            e.code,
+                            exit_code,
                         )
                 except Exception as e:
                     logger.error(

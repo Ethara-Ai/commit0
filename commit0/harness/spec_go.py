@@ -85,7 +85,7 @@ class Commit0GoSpec(Spec):
         eval_script_list = [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
-            f"git apply -v {diff_path}",
+            f"git apply -v --allow-empty {diff_path}",
             "goimports -w .",
             "git status",
             f"{test_cmd} > test_output.json 2> test_stderr.txt",
