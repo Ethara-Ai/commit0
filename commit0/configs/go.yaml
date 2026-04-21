@@ -1,0 +1,16 @@
+defaults:
+  - _self_
+
+dataset_name: wentingzhao/commit0_go
+dataset_split: test
+
+base_dir: repos/
+repo_split: all
+
+num_workers: 8
+
+backend: local
+timeout: 1_800
+num_cpus: 1
+
+github_token: null
