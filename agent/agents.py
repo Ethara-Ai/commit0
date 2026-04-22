@@ -467,8 +467,42 @@ class AiderAgents(Agents):
         self.model = Model(model_name)
         self.model_name = model_name
         self.cache_prompts = cache_prompts
+
+        # Helicone proxy gateway (opt-in via env vars)
+        helicone_key = os.environ.get("HELICONE_API_KEY", "")
+        helicone_base = os.environ.get("HELICONE_API_BASE", "")
+        if helicone_key and helicone_base and "bedrock" in model_name:
+            _HELICONE_MODEL_MAP: dict[str, str] = {
+                "8lzlkxguk85a": "bedrock/zai.glm-5",
+                "cddwmu6axlfp": "bedrock/amazon.nova-2-lite-v1:0",
+            }
+            for arn_suffix, short_name in _HELICONE_MODEL_MAP.items():
+                if arn_suffix in model_name:
+                    _logger.info("Helicone remap: %s → %s", model_name, short_name)
+                    self.model_name = short_name
+                    self.model = Model(short_name)
+                    break
+
+            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+            os.environ.pop("AWS_ACCESS_KEY_ID", None)
+            os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+
+            if not self.model.extra_params:
+                self.model.extra_params = {}
+            self.model.extra_params["api_base"] = helicone_base
+            self.model.extra_params["api_key"] = helicone_key
+            self.model.extra_params["aws_region_name"] = "ap-south-1"
+
+            _logger.info(
+                "Helicone proxy enabled (base=%s, model=%s)",
+                helicone_base,
+                self.model_name,
+            )
+
         # Check if API key is set for the model
-        if "bedrock" in model_name:
+        if helicone_key and helicone_base and "bedrock" in model_name:
+            api_key = helicone_key
+        elif "bedrock" in model_name:
             api_key = os.environ.get("AWS_ACCESS_KEY_ID", None) or os.environ.get(
                 "AWS_BEARER_TOKEN_BEDROCK", None
             )

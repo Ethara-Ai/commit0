@@ -60,11 +60,13 @@ Required:
   --dataset  <name|path>   Dataset name or path to JSON file
 
 Model presets:
-  opus     Bedrock Claude Opus 4.6
-  kimi     Bedrock Kimi K2.5
-  glm5     Bedrock GLM 5
-  minimax  Bedrock MiniMax M2.5
-  gpt54    OpenAI GPT-5.4
+  opus          Bedrock Claude Opus 4.6
+  kimi          Bedrock Kimi K2.5
+  glm5|glm-5    Bedrock GLM 5
+  minimax       Bedrock MiniMax M2.5
+  nova-lite|nova-2-lite  Bedrock Nova 2 Lite
+  nova-premier  Bedrock Nova Premier
+  gpt54         OpenAI GPT-5.4
 
 Dataset examples:
   minitorch            Uses minitorch_dataset.json, repo_split=minitorch
@@ -157,8 +159,12 @@ resolve_model() {
             MODEL_SHORT="kimi-k2.5"
             CACHE_PROMPTS="false"
             ;;
-        glm5)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/8lzlkxguk85a"
+        glm5|glm-5)
+            if [[ -n "${HELICONE_API_KEY:-}" && -n "${HELICONE_API_BASE:-}" ]]; then
+                MODEL_NAME="bedrock/zai.glm-5"
+            else
+                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/8lzlkxguk85a"
+            fi
             MODEL_SHORT="glm-5"
             CACHE_PROMPTS="false"
             ;;
@@ -172,24 +178,18 @@ resolve_model() {
             MODEL_SHORT="nova-premier"
             CACHE_PROMPTS="false"
             ;;
-        nova-lite)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp"
+        nova-lite|nova-2-lite)
+            if [[ -n "${HELICONE_API_KEY:-}" && -n "${HELICONE_API_BASE:-}" ]]; then
+                MODEL_NAME="bedrock/amazon.nova-2-lite-v1:0"
+            else
+                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp"
+            fi
             MODEL_SHORT="nova-2-lite"
             CACHE_PROMPTS="false"
             ;;
         gpt54)
             MODEL_NAME="openai/gpt-5.4"
             MODEL_SHORT="gpt-5.4"
-            CACHE_PROMPTS="false"
-            ;;
-        nova-lite)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp"
-            MODEL_SHORT="nova-2-lite"
-            CACHE_PROMPTS="false"
-            ;;
-        nova-premier)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/td6kwwwp7q0e"
-            MODEL_SHORT="nova-premier"
             CACHE_PROMPTS="false"
             ;;
         *)
@@ -443,6 +443,24 @@ os.environ.setdefault("LITELLM_LOG", "ERROR")
 import litellm
 litellm.drop_params = True
 
+# Helicone proxy gateway — pass pk- key as api_key (plain Bearer header, no SigV4)
+_hk = os.environ.get("HELICONE_API_KEY", "")
+_hb = os.environ.get("HELICONE_API_BASE", "")
+_HELICONE_MODEL_MAP = {
+    "8lzlkxguk85a": "bedrock/zai.glm-5",
+    "cddwmu6axlfp": "bedrock/amazon.nova-2-lite-v1:0",
+}
+if _hk and _hb and "bedrock" in model_name:
+    for _arn_suffix, _short in _HELICONE_MODEL_MAP.items():
+        if _arn_suffix in model_name:
+            print(f"PROBE: Helicone remap: {model_name} → {_short}")
+            model_name = _short
+            break
+    os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
+    os.environ.pop("AWS_ACCESS_KEY_ID", None)
+    os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
+    print(f"PROBE: Helicone proxy enabled (base={_hb}, model={model_name})")
+
 from aider.models import Model
 from aider.llm import litellm as aider_litellm
 
@@ -454,13 +472,19 @@ except Exception as e:
 
 messages = [{"role": "user", "content": "Reply with exactly: OK"}]
 
+_probe_kwargs = dict(
+    model=m.name,
+    messages=messages,
+    max_tokens=8,
+    timeout=60,
+)
+if _hk and _hb and "bedrock" in model_name:
+    _probe_kwargs["api_base"] = _hb
+    _probe_kwargs["api_key"] = _hk
+    _probe_kwargs["aws_region_name"] = "ap-south-1"
+
 try:
-    resp = aider_litellm.completion(
-        model=m.name,
-        messages=messages,
-        max_tokens=8,
-        timeout=60,
-    )
+    resp = aider_litellm.completion(**_probe_kwargs)
     content = resp.choices[0].message.content.strip()
     print(f"PROBE_OK: model responded: {content!r}")
 except Exception as e:
