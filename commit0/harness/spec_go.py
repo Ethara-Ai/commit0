@@ -95,7 +95,7 @@ class Commit0GoSpec(Spec):
             f"    exit 0",
             "  fi",
             "fi",
-            "goimports -w .",
+            "find . -name '*.go' -not -name '*_test.go' -not -path '*/vendor/*' | xargs goimports -w",
             "git status",
             f"{test_cmd} > test_output.json 2> test_stderr.txt",
             "echo $? > go_test_exit_code.txt",

@@ -260,6 +260,14 @@ def create_stubbed_branch(
         timeout=120,
     )
 
+    for test_file in repo_dir.rglob("*_test.go"):
+        subprocess.run(
+            ["git", "checkout", "--", str(test_file.relative_to(repo_dir))],
+            cwd=repo_dir,
+            capture_output=True,
+            text=True,
+        )
+
     git(repo_dir, "add", "-A")
 
     status = git(repo_dir, "status", "--porcelain")

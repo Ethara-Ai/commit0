@@ -104,7 +104,31 @@ func runGoimports(dir string) {
 		dir = "."
 	}
 	bin := findGoimports()
-	cmd := exec.Command(bin, "-w", dir)
+
+	skipDirs := map[string]bool{"vendor": true, ".git": true, "testdata": true}
+	var files []string
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if skipDirs[info.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(path, ".go") && !strings.HasSuffix(path, "_test.go") {
+			files = append(files, path)
+		}
+		return nil
+	})
+
+	if len(files) == 0 {
+		return
+	}
+
+	args := append([]string{"-w"}, files...)
+	cmd := exec.Command(bin, args...)
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
