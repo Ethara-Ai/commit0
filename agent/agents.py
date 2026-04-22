@@ -28,8 +28,8 @@ BEDROCK_REGION_MODEL_PRICING = {
         "supports_vision": True,
     },
     "zai.glm-5": {
-        "input_cost_per_token": 1.2e-06,
-        "output_cost_per_token": 3.84e-06,
+        "input_cost_per_token": 1e-06,
+        "output_cost_per_token": 3.2e-06,
         "max_input_tokens": 202752,
         "max_output_tokens": 128000,
         "max_tokens": 128000,
@@ -40,8 +40,8 @@ BEDROCK_REGION_MODEL_PRICING = {
         "supports_vision": False,
     },
     "minimax.minimax-m2.5": {
-        "input_cost_per_token": 3.6e-07,
-        "output_cost_per_token": 1.44e-06,
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
         "max_input_tokens": 196608,
         "max_output_tokens": 8192,
         "max_tokens": 8192,
@@ -51,12 +51,12 @@ BEDROCK_REGION_MODEL_PRICING = {
         "supports_system_messages": True,
         "supports_vision": False,
     },
-    "amazon.nova-lite-v1:0": {
+    "amazon.nova-2-lite-v1:0": {
         "input_cost_per_token": 3e-07,
         "output_cost_per_token": 2.5e-06,
         "max_input_tokens": 1000000,
-        "max_output_tokens": 64000,
-        "max_tokens": 64000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
         "mode": "chat",
         "litellm_provider": "bedrock",
         "supports_function_calling": True,
@@ -82,7 +82,7 @@ _ARN_PROFILE_TO_MODEL: dict[str, str] = {
     "8lzlkxguk85a": "zai.glm-5",
     "5m69567zugvx": "moonshotai.kimi-k2.5",
     "6oaav7wbxid4": "minimax.minimax-m2.5",
-    "cddwmu6axlfp": "amazon.nova-lite-v1:0",
+    "cddwmu6axlfp": "amazon.nova-2-lite-v1:0",
     "td6kwwwp7q0e": "amazon.nova-premier-v1:0",
 }
 
@@ -421,6 +421,26 @@ def _apply_thinking_capture_patches(
     coder.add_assistant_reply_to_cur_messages = patched_add_assistant_reply
     coder.show_usage_report = patched_show_usage_report
     coder.clone = patched_clone
+
+    # Patch 7: Ensure cost is calculated even when FinishReasonLength fires.
+    # Upstream aider bug: send() calls calculate_and_show_tokens_and_cost()
+    # AFTER show_send_output_stream(), but FinishReasonLength raised inside
+    # the stream skips the cost line. We wrap send() to catch it.
+    _original_send = coder.send
+
+    def patched_send(messages: Any, model: Any = None, functions: Any = None) -> Any:
+        from aider.coders.base_coder import FinishReasonLength
+
+        try:
+            yield from _original_send(messages, model=model, functions=functions)
+        except FinishReasonLength:
+            try:
+                coder.calculate_and_show_tokens_and_cost(messages, None)
+            except Exception:
+                pass
+            raise
+
+    coder.send = patched_send
 
     _original_apply_updates = coder.apply_updates
 

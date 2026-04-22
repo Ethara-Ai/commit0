@@ -57,6 +57,7 @@ _BASE_APT_PACKAGES: frozenset[str] = frozenset(
         "libatomic1",
         "locales",
         "locales-all",
+        "procps",
     }
 )
 
