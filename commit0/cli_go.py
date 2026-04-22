@@ -21,7 +21,12 @@ import commit0.harness.lint_go
 import commit0.harness.run_go_tests
 import commit0.harness.save
 import commit0.harness.setup_go
-from commit0.harness.constants_go import GO_SPLIT, GO_SPLIT_ALL
+from commit0.harness.constants_go import (
+    GO_SPLIT,
+    GO_SPLIT_ALL,
+    resolve_go_split,
+    resolve_go_split_all,
+)
 from commit0.harness.utils import get_active_branch
 
 logger = logging.getLogger(__name__)
@@ -132,7 +137,8 @@ def setup(
 ) -> None:
     """Clone Go repositories for a given split."""
     if repo_split != "all":
-        check_valid(repo_split, list(GO_SPLIT.keys()) + GO_SPLIT_ALL)
+        merged = resolve_go_split(dataset_name, dataset_split)
+        check_valid(repo_split, list(merged.keys()) + resolve_go_split_all(dataset_name, dataset_split))
 
     base_dir = str(Path(base_dir).resolve())
     if dataset_name.endswith(".json"):
@@ -188,7 +194,11 @@ def build(
         config["repo_split"] != "all"
         and "commit0" in config["dataset_name"].split("/")[-1].lower()
     ):
-        check_valid(config["repo_split"], list(GO_SPLIT.keys()) + GO_SPLIT_ALL)
+        merged = resolve_go_split(config["dataset_name"], config["dataset_split"])
+        check_valid(
+            config["repo_split"],
+            list(merged.keys()) + resolve_go_split_all(config["dataset_name"], config["dataset_split"]),
+        )
 
     typer.echo(
         f"Building Go images for split: {highlight(config['repo_split'], Colors.ORANGE)}"
@@ -249,7 +259,11 @@ def test(
     config = read_commit0_go_config(commit0_config_file)
     if repo_or_repo_path.endswith("/"):
         repo_or_repo_path = repo_or_repo_path[:-1]
-    check_valid(repo_or_repo_path.split("/")[-1], list(GO_SPLIT.keys()) + GO_SPLIT_ALL)
+    merged = resolve_go_split(config["dataset_name"], config["dataset_split"])
+    check_valid(
+        repo_or_repo_path.split("/")[-1],
+        list(merged.keys()) + resolve_go_split_all(config["dataset_name"], config["dataset_split"]),
+    )
 
     if reference:
         branch = "reference"
@@ -304,7 +318,11 @@ def evaluate(
 
     config = read_commit0_go_config(commit0_config_file)
     if config["repo_split"] != "all":
-        check_valid(config["repo_split"], list(GO_SPLIT.keys()) + GO_SPLIT_ALL)
+        merged = resolve_go_split(config["dataset_name"], config["dataset_split"])
+        check_valid(
+            config["repo_split"],
+            list(merged.keys()) + resolve_go_split_all(config["dataset_name"], config["dataset_split"]),
+        )
 
     typer.echo(f"Evaluating Go split: {highlight(config['repo_split'], Colors.ORANGE)}")
     typer.echo(f"Branch: {branch}")
@@ -364,7 +382,8 @@ def save(
     repo_split = config["repo_split"]
     typer.echo(f"Saving Go split: {highlight(repo_split, Colors.ORANGE)}")
 
-    resolved_repos = GO_SPLIT.get(repo_split, [repo_split])
+    merged = resolve_go_split(config["dataset_name"], config["dataset_split"])
+    resolved_repos = merged.get(repo_split, [repo_split])
     for repo_name in resolved_repos:
         commit0.harness.save.main(
             config["dataset_name"],
