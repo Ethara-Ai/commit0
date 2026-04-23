@@ -15,16 +15,23 @@ logger = logging.getLogger(__name__)
 
 def parse_go_test_json(raw_output: str) -> Dict[str, TestStatus]:
     """Parse go test -json output into {test_id: TestStatus}."""
-    results, _ = parse_go_test_json_with_durations(raw_output)
+    results, _, _ = parse_go_test_json_with_durations(raw_output)
     return results
 
 
 def parse_go_test_json_with_durations(
     raw_output: str,
-) -> Tuple[Dict[str, TestStatus], Dict[str, float]]:
-    """Parse go test -json into (results, durations) dicts keyed by package/TestName."""
+) -> Tuple[Dict[str, TestStatus], Dict[str, float], Dict[str, float]]:
+    """Parse go test -json into (results, durations, pkg_durations).
+
+    Returns:
+        results: {test_id: TestStatus} keyed by package/TestName
+        durations: {test_id: float} per-test elapsed seconds (integer-truncated by Go for sub-second tests)
+        pkg_durations: {package: float} package-level elapsed seconds (precise, from ``go test -json``)
+    """
     results: Dict[str, TestStatus] = {}
     durations: Dict[str, float] = {}
+    pkg_durations: Dict[str, float] = {}
     running: Dict[str, bool] = {}  # tests that got "run" but no terminal action yet
 
     for line in raw_output.splitlines():
@@ -42,14 +49,16 @@ def parse_go_test_json_with_durations(
         test = event.get("Test")
         elapsed = event.get("Elapsed")
 
-        # Package-level events (no Test field) — only care about package "fail"
-        # which means a test crashed without reporting its own pass/fail
+        # Package-level events (no Test field)
         if test is None:
             if action == "fail" and package:
                 for key, is_running in list(running.items()):
                     if is_running and key.startswith(package + "/"):
                         results[key] = TestStatus.ERROR
                         del running[key]
+            # Capture package-level elapsed on pass or fail (precise timing)
+            if action in ("pass", "fail") and package and elapsed is not None:
+                pkg_durations[package] = elapsed
             continue
 
         test_id = f"{package}/{test}"
@@ -78,7 +87,7 @@ def parse_go_test_json_with_durations(
         if test_id not in results:
             results[test_id] = TestStatus.ERROR
 
-    return results, durations
+    return results, durations, pkg_durations
 
 
 def parse_go_test_plain(raw_output: str) -> Dict[str, TestStatus]:

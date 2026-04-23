@@ -242,17 +242,19 @@ def main(
         with open(test_output_file, "r") as f:
             raw_output = f.read()
 
-        results, durations = parse_go_test_json_with_durations(raw_output)
+        results, durations, pkg_durations = parse_go_test_json_with_durations(
+            raw_output
+        )
 
         num_passed = 0
-        total_duration = 0.0
+        total_duration = (
+            sum(pkg_durations.values()) if pkg_durations else sum(durations.values())
+        )
         status_counter: Counter[str] = Counter()
         per_test_results: list[tuple[str, str, float]] = []
         for tid in test_ids_flat:
             if tid in results:
                 raw_status = results[tid].value
-                # Map to Python-compatible statuses: PASSED, FAILED, SKIPPED
-                # Parser ERROR (orphaned/crashed tests) → FAILED for eval parity
                 if raw_status in ("PASSED", "SKIPPED"):
                     status = raw_status
                 else:
@@ -261,7 +263,6 @@ def main(
                 if status == "PASSED":
                     num_passed += 1
                 dur = durations.get(tid, 0.0)
-                total_duration += dur
                 per_test_results.append((tid, status, dur))
             else:
                 status_counter["FAILED"] += 1
