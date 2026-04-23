@@ -970,6 +970,8 @@ def summarize_test_output(
     max_length: int = 15000,
     model: str = "",
     max_tokens: int = 4000,
+    api_base: str = "",
+    api_key: str = "",
 ) -> tuple[str, list[SummarizerCost]]:
     """Hybrid 3-tier test output summarization.
 
@@ -1005,7 +1007,7 @@ def summarize_test_output(
     try:
         import litellm
 
-        response = litellm.completion(
+        kwargs: dict = dict(
             model=model,
             messages=[
                 {
@@ -1024,6 +1026,11 @@ def summarize_test_output(
             ],
             max_tokens=max_tokens,
         )
+        if api_base:
+            kwargs["api_base"] = api_base
+        if api_key:
+            kwargs["api_key"] = api_key
+        response = litellm.completion(**kwargs)
 
         cost = SummarizerCost()
         usage = getattr(response, "usage", None)

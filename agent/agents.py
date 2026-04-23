@@ -617,6 +617,8 @@ class AiderAgents(Agents):
                 _max_len = max_test_output_length
                 _model = self.model_name
                 _max_tok = spec_summary_max_tokens
+                _api_base = getattr(self.model, "extra_params", {}).get("api_base", "")
+                _api_key = getattr(self.model, "extra_params", {}).get("api_key", "")
 
                 def _wrapped_cmd_test(test_cmd_arg: str) -> str:
                     raw = _original_cmd_test(test_cmd_arg)
@@ -626,6 +628,8 @@ class AiderAgents(Agents):
                             max_length=_max_len,
                             model=_model,
                             max_tokens=_max_tok,
+                            api_base=_api_base,
+                            api_key=_api_key,
                         )
                         _test_summarizer_costs.extend(costs)
                         return result
