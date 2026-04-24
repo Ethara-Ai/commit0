@@ -79,7 +79,7 @@ BEDROCK_REGION_MODEL_PRICING = {
 
 _ARN_PROFILE_TO_MODEL: dict[str, str] = {
     "4w7tmk1iplxi": "anthropic.claude-opus-4-6-v1",
-    "8lzlkxguk85a": "zai.glm-5",
+    "1ziwaxsu12qb": "zai.glm-5",
     "5m69567zugvx": "moonshotai.kimi-k2.5",
     "6oaav7wbxid4": "minimax.minimax-m2.5",
     "cddwmu6axlfp": "amazon.nova-2-lite-v1:0",
@@ -468,41 +468,8 @@ class AiderAgents(Agents):
         self.model_name = model_name
         self.cache_prompts = cache_prompts
 
-        # Helicone proxy gateway (opt-in via env vars)
-        helicone_key = os.environ.get("HELICONE_API_KEY", "")
-        helicone_base = os.environ.get("HELICONE_API_BASE", "")
-        if helicone_key and helicone_base and "bedrock" in model_name:
-            _HELICONE_MODEL_MAP: dict[str, str] = {
-                "8lzlkxguk85a": "bedrock/zai.glm-5",
-                "cddwmu6axlfp": "bedrock/amazon.nova-2-lite-v1:0",
-            }
-            for arn_suffix, short_name in _HELICONE_MODEL_MAP.items():
-                if arn_suffix in model_name:
-                    _logger.info("Helicone remap: %s → %s", model_name, short_name)
-                    self.model_name = short_name
-                    self.model = Model(short_name)
-                    break
-
-            os.environ.pop("AWS_BEARER_TOKEN_BEDROCK", None)
-            os.environ.pop("AWS_ACCESS_KEY_ID", None)
-            os.environ.pop("AWS_SECRET_ACCESS_KEY", None)
-
-            if not self.model.extra_params:
-                self.model.extra_params = {}
-            self.model.extra_params["api_base"] = helicone_base
-            self.model.extra_params["api_key"] = helicone_key
-            self.model.extra_params["aws_region_name"] = "ap-south-1"
-
-            _logger.info(
-                "Helicone proxy enabled (base=%s, model=%s)",
-                helicone_base,
-                self.model_name,
-            )
-
         # Check if API key is set for the model
-        if helicone_key and helicone_base and "bedrock" in model_name:
-            api_key = helicone_key
-        elif "bedrock" in model_name:
+        if "bedrock" in model_name:
             api_key = os.environ.get("AWS_ACCESS_KEY_ID", None) or os.environ.get(
                 "AWS_BEARER_TOKEN_BEDROCK", None
             )
@@ -617,8 +584,6 @@ class AiderAgents(Agents):
                 _max_len = max_test_output_length
                 _model = self.model_name
                 _max_tok = spec_summary_max_tokens
-                _api_base = getattr(self.model, "extra_params", {}).get("api_base", "")
-                _api_key = getattr(self.model, "extra_params", {}).get("api_key", "")
 
                 def _wrapped_cmd_test(test_cmd_arg: str) -> str:
                     raw = _original_cmd_test(test_cmd_arg)
@@ -628,8 +593,6 @@ class AiderAgents(Agents):
                             max_length=_max_len,
                             model=_model,
                             max_tokens=_max_tok,
-                            api_base=_api_base,
-                            api_key=_api_key,
                         )
                         _test_summarizer_costs.extend(costs)
                         return result

@@ -14,7 +14,7 @@
     "supports_vision": true,
     "supports_assistant_prefill": false
   },
-  "bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/8lzlkxguk85a": {
+  "bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb": {
     "max_input_tokens": 202752,
     "max_output_tokens": 128000,
     "max_tokens": 128000,
@@ -67,36 +67,6 @@
     "edit_format": "diff",
     "input_cost_per_token": 2.5e-06,
     "output_cost_per_token": 1e-05,
-    "litellm_provider": "bedrock",
-    "supports_function_calling": true,
-    "supports_system_messages": true,
-    "supports_tool_choice": true,
-    "supports_vision": true,
-    "supports_assistant_prefill": true
-  },
-  "bedrock/zai.glm-5": {
-    "max_input_tokens": 202752,
-    "max_output_tokens": 128000,
-    "max_tokens": 128000,
-    "mode": "chat",
-    "edit_format": "diff",
-    "input_cost_per_token": 1.2e-06,
-    "output_cost_per_token": 3.84e-06,
-    "litellm_provider": "bedrock",
-    "supports_function_calling": true,
-    "supports_system_messages": true,
-    "supports_tool_choice": true,
-    "supports_vision": false,
-    "supports_assistant_prefill": false
-  },
-  "bedrock/amazon.nova-2-lite-v1:0": {
-    "max_input_tokens": 1000000,
-    "max_output_tokens": 128000,
-    "max_tokens": 128000,
-    "mode": "chat",
-    "edit_format": "diff",
-    "input_cost_per_token": 6e-08,
-    "output_cost_per_token": 2.4e-07,
     "litellm_provider": "bedrock",
     "supports_function_calling": true,
     "supports_system_messages": true,
