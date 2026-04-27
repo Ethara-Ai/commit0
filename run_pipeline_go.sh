@@ -124,7 +124,7 @@ resolve_model() {
             CACHE_PROMPTS="false"
             ;;
         glm5)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/8lzlkxguk85a"
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb"
             MODEL_SHORT="glm-5"
             CACHE_PROMPTS="false"
             ;;
@@ -139,7 +139,7 @@ resolve_model() {
             CACHE_PROMPTS="false"
             ;;
         nova-lite)
-            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp"
+            MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/lv09a6pe7jzv"
             MODEL_SHORT="nova-2-lite"
             CACHE_PROMPTS="false"
             ;;

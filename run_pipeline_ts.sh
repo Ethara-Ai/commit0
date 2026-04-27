@@ -152,7 +152,7 @@ resolve_model() {
             if [[ -n "${HELICONE_API_KEY:-}" ]] && [[ -n "${HELICONE_API_BASE:-}" ]]; then
                 MODEL_NAME="bedrock/zai.glm-5"
             else
-                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/8lzlkxguk85a"
+                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb"
             fi
             MODEL_SHORT="glm-5"
             CACHE_PROMPTS="false"
@@ -171,7 +171,7 @@ resolve_model() {
             if [[ -n "${HELICONE_API_KEY:-}" ]] && [[ -n "${HELICONE_API_BASE:-}" ]]; then
                 MODEL_NAME="bedrock/amazon.nova-2-lite-v1:0"
             else
-                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp"
+                MODEL_NAME="bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/lv09a6pe7jzv"
             fi
             MODEL_SHORT="nova-2-lite"
             CACHE_PROMPTS="false"
@@ -426,8 +426,8 @@ from aider.models import Model
 from aider.llm import litellm as aider_litellm
 
 _HELICONE_MODEL_MAP = {
-    "8lzlkxguk85a": "bedrock/zai.glm-5",
-    "cddwmu6axlfp": "bedrock/amazon.nova-2-lite-v1:0",
+    "1ziwaxsu12qb": "bedrock/zai.glm-5",
+    "lv09a6pe7jzv": "bedrock/amazon.nova-2-lite-v1:0",
 }
 
 _hk = os.environ.get("HELICONE_API_KEY", "")

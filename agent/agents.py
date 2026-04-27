@@ -82,7 +82,7 @@ _ARN_PROFILE_TO_MODEL: dict[str, str] = {
     "1ziwaxsu12qb": "zai.glm-5",
     "5m69567zugvx": "moonshotai.kimi-k2.5",
     "6oaav7wbxid4": "minimax.minimax-m2.5",
-    "cddwmu6axlfp": "amazon.nova-2-lite-v1:0",
+    "lv09a6pe7jzv": "amazon.nova-2-lite-v1:0",
     "td6kwwwp7q0e": "amazon.nova-premier-v1:0",
 }
 

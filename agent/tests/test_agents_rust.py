@@ -41,7 +41,7 @@ class TestResolveModelIdFromStaticMap:
     def test_nova_lite_profile(self):
         from agent.agents import _resolve_model_id_from_static_map
 
-        result = _resolve_model_id_from_static_map("prefix-cddwmu6axlfp-suffix")
+        result = _resolve_model_id_from_static_map("prefix-lv09a6pe7jzv-suffix")
         assert result == "amazon.nova-lite-v1:0"
 
     def test_nova_premier_profile(self):

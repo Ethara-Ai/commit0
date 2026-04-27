@@ -14,13 +14,13 @@
   accepts_settings:
     - thinking_tokens
 
-- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/cddwmu6axlfp
+- name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/lv09a6pe7jzv
   edit_format: diff
   use_repo_map: true
   examples_as_sys_msg: false
   use_temperature: false
   extra_params:
-    max_tokens: 128000
+    max_tokens: 65535
 
 - name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/td6kwwwp7q0e
   edit_format: diff
