@@ -1,0 +1,13 @@
+[package]
+name = "ruststubber"
+version = "0.1.0"
+edition = "2021"
+description = "Replaces Rust function bodies with panic!(\"STUB: not implemented\") using syn's Fold trait"
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut", "fold", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+prettyplease = "0.2"
+clap = { version = "4", features = ["derive"] }
+walkdir = "2"

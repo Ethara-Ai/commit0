@@ -1,0 +1,24 @@
+# ── Prerequisites (one-time setup) ────────────────────
+# Requires: Python 3.12+, Rust toolchain, Docker, gh CLI
+
+# 1. Install Python deps
+uv sync --all-extras
+source .venv/bin/activate
+
+# 2. Build ruststubber binary
+cd tools/ruststubber && cargo build --release && cd ../..
+
+# 3. (Optional) Install playwright browsers for spec scraping
+playwright install chromium
+
+# ── Run pipeline for a repo ────────────────────────────
+
+# Step 1: Prepare repo (fork, stub, collect test IDs, scrape spec)
+python -m tools.prepare_repo_rust \
+  --upstream <OWNER/REPO> \
+  --crate <CRATE_NAME> \
+  --src-dir <CRATE_NAME/src> \
+  --test-cmd "cargo test -p <CRATE_NAME>"
+
+# Step 2: Build Docker image
+python -m commit0.harness.build_rust ./<repo-name_rust_dataset>.json
