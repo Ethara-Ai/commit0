@@ -160,36 +160,253 @@ def detect_ts_src_dir(repo_dir: Path) -> str:
     return ""
 
 
+_TEST_SCAN_SKIP_DIRS = {
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".nuxt",
+    "out",
+    ".turbo",
+    ".cache",
+    ".yarn",
+    ".pnp",
+    ".pnpm-store",
+    "lib",
+    "es",
+    "esm",
+    "cjs",
+}
+
+_TEST_DIR_NAMES = {"__tests__", "test", "tests", "__test__", "spec", "specs"}
+_TEST_FILE_SUFFIXES = (
+    ".test.ts",
+    ".spec.ts",
+    ".test.tsx",
+    ".spec.tsx",
+    ".test.js",
+    ".spec.js",
+    ".test.jsx",
+    ".spec.jsx",
+    ".test.mts",
+    ".spec.mts",
+    ".test.cjs",
+    ".spec.cjs",
+)
+
+
+def _walk_repo_filtered(repo_dir: Path):
+    """Yield (dirpath, dirnames, filenames) walking *repo_dir* while skipping vendor dirs.
+
+    Walks are always rooted at *repo_dir*. Hidden dirs (leading dot) are skipped except
+    for the repo root itself. ``node_modules`` and other vendor dirs in
+    ``_TEST_SCAN_SKIP_DIRS`` are pruned in-place.
+    """
+    for dirpath, dirnames, filenames in os.walk(repo_dir):
+        # Prune in-place so os.walk does not descend into vendor / build dirs.
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if d not in _TEST_SCAN_SKIP_DIRS and not d.startswith(".")
+        ]
+        yield Path(dirpath), dirnames, filenames
+
+
+def _detect_test_dirs_from_config(repo_dir: Path) -> list[Path]:
+    """Config-driven test detection.
+
+    Parses package.json (jest / vitest / mocha blocks), jest.config.*, vitest.config.*,
+    and .mocharc.* for test-file globs or roots. Returns absolute dirs that exist and
+    contain at least one TS / JS source file. No throwing -- returns [] on any error.
+    """
+    import re
+
+    candidate_strings: list[str] = []
+
+    # ---- package.json: jest.* + vitest.* + mocha --------------------------------------
+    pkg_path = repo_dir / "package.json"
+    if pkg_path.exists():
+        try:
+            pkg = json.loads(pkg_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pkg = {}
+        jest_block = pkg.get("jest", {}) if isinstance(pkg, dict) else {}
+        if isinstance(jest_block, dict):
+            for key in ("testMatch", "testRegex", "roots", "testPathIgnorePatterns"):
+                val = jest_block.get(key)
+                if isinstance(val, list):
+                    candidate_strings.extend(str(v) for v in val)
+                elif isinstance(val, str):
+                    candidate_strings.append(val)
+        mocha_block = pkg.get("mocha", {}) if isinstance(pkg, dict) else {}
+        if isinstance(mocha_block, dict):
+            spec = mocha_block.get("spec")
+            if isinstance(spec, list):
+                candidate_strings.extend(str(v) for v in spec)
+            elif isinstance(spec, str):
+                candidate_strings.append(spec)
+        vitest_block = pkg.get("vitest", {}) if isinstance(pkg, dict) else {}
+        if isinstance(vitest_block, dict):
+            for key in ("include", "dir", "root"):
+                val = vitest_block.get(key)
+                if isinstance(val, list):
+                    candidate_strings.extend(str(v) for v in val)
+                elif isinstance(val, str):
+                    candidate_strings.append(val)
+
+    # ---- jest.config.* / vitest.config.* / .mocharc.* (scrape test-related keys only) --
+    CONFIG_FILES = [
+        "jest.config.js",
+        "jest.config.cjs",
+        "jest.config.mjs",
+        "jest.config.ts",
+        "jest.config.json",
+        "vitest.config.ts",
+        "vitest.config.js",
+        "vitest.config.mts",
+        "vitest.config.cjs",
+        "vitest.workspace.ts",
+        ".mocharc.json",
+        ".mocharc.cjs",
+        ".mocharc.js",
+        ".mocharc.yml",
+        ".mocharc.yaml",
+    ]
+    # Only scrape string values adjacent to test-location keys.
+    # Avoids false positives from collectCoverageFrom, transform, etc.
+    _TEST_LOCATION_KEYS = (
+        "testMatch",
+        "testRegex",
+        "testPathPattern",
+        "roots",
+        "testDir",
+        "include",
+        "dir",
+        "spec",
+    )
+    _cfg_key_value_re = re.compile(
+        r"(?:"
+        + "|".join(re.escape(k) for k in _TEST_LOCATION_KEYS)
+        + r")"
+        r"""['"]*\s*[:=]\s*"""
+        r"""[\[]*\s*['"` ]?([^'"`\n\],]{1,300})['"` \]]?""",
+    )
+    for name in CONFIG_FILES:
+        cfg_path = repo_dir / name
+        if not cfg_path.exists():
+            continue
+        try:
+            text = cfg_path.read_text()
+        except OSError:
+            continue
+        for match in _cfg_key_value_re.findall(text):
+            candidate_strings.append(match.strip())
+
+    # ---- Convert glob/regex strings into concrete directories -------------------------
+    resolved: list[Path] = []
+    seen: set[Path] = set()
+    for s in candidate_strings:
+        s = s.strip()
+        if not s or s.startswith("!"):
+            continue
+        # Strip leading <rootDir>/, ./, /
+        s = re.sub(r"^<rootDir>/?", "", s)
+        s = re.sub(r"^\./", "", s)
+        s = s.lstrip("/")
+        # Strip file-name / glob tail to get the "dir" part.
+        # Take everything up to the first wildcard or file-extension token.
+        dir_part = re.split(r"[*?(]|\.(?:t|j)sx?$|\.spec|\.test", s, maxsplit=1)[0]
+        dir_part = dir_part.rstrip("/")
+        if not dir_part:
+            continue
+        candidate = (repo_dir / dir_part).resolve()
+        # Reject escapes and non-existent dirs.
+        try:
+            candidate.relative_to(repo_dir.resolve())
+        except ValueError:
+            continue
+        if not candidate.is_dir():
+            continue
+        if candidate == repo_dir.resolve():
+            # Root-level config match is too coarse; keep for tier 2 to refine.
+            continue
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        resolved.append(candidate)
+
+    # Only keep dirs that actually contain TS / JS source files anywhere below.
+    kept: list[Path] = []
+    for d in resolved:
+        for _, _, files in _walk_repo_filtered(d):
+            if any(
+                f.endswith((".ts", ".tsx", ".js", ".jsx", ".mts", ".cjs")) for f in files
+            ):
+                kept.append(d)
+                break
+    return kept
+
+
+def _detect_test_dirs_recursive_scan(repo_dir: Path) -> list[Path]:
+    """Recursive filesystem scan.
+
+    Looks for (a) *any* directory named __tests__ / test / tests / spec / specs that
+    contains a TS or JS file, and (b) parent directories of *.test.* / *.spec.* files.
+    Returns candidates ranked by number of test files (descending).
+    """
+    counts: dict[Path, int] = {}
+    for dirpath, _, filenames in _walk_repo_filtered(repo_dir):
+        # (a) Named test directories
+        if dirpath != repo_dir and dirpath.name.lower() in _TEST_DIR_NAMES:
+            ts_js_files = [
+                f
+                for f in filenames
+                if f.endswith((".ts", ".tsx", ".js", ".jsx", ".mts", ".cjs"))
+            ]
+            if ts_js_files:
+                counts[dirpath] = counts.get(dirpath, 0) + len(ts_js_files)
+        # (b) Files with .test.* / .spec.* suffix
+        for f in filenames:
+            if f.endswith(_TEST_FILE_SUFFIXES):
+                counts[dirpath] = counts.get(dirpath, 0) + 1
+    # Sort by count desc, then by shortest path (closer to root = more canonical).
+    return [p for p, _ in sorted(counts.items(), key=lambda kv: (-kv[1], len(kv[0].parts)))]
+
+
 def detect_ts_test_dirs(repo_dir: Path) -> list[Path]:
     """Find test directories containing TypeScript test files.
 
-    Looks for directories matching common TS test patterns:
-    __tests__/, test/, tests/ that contain .test.ts or .spec.ts files.
+   uses 3-tier detection (config-driven → recursive scan → empty).
 
     Returns
     -------
-        List of absolute Paths to test directories.
+        List of absolute Paths to test directories, ranked by confidence. Empty when
+        no tests found anywhere (callers must handle this explicitly).
 
     """
-    test_dirs: list[Path] = []
-    test_dir_names = {"__tests__", "test", "tests"}
+    # Tier 1: config-driven
+    config_dirs = _detect_test_dirs_from_config(repo_dir)
+    if config_dirs:
+        return config_dirs
 
-    for child in sorted(repo_dir.iterdir()):
-        if not child.is_dir():
-            continue
-        if child.name.lower() in test_dir_names:
-            ts_test_files = (
-                list(child.rglob("*.test.ts"))
-                + list(child.rglob("*.spec.ts"))
-                + list(child.rglob("*.test.tsx"))
-                + list(child.rglob("*.spec.tsx"))
-                + list(child.rglob("*.test.js"))
-                + list(child.rglob("*.spec.js"))
-            )
-            if ts_test_files:
-                test_dirs.append(child)
+    # Tier 2: recursive scan
+    return _detect_test_dirs_recursive_scan(repo_dir)
 
-    return test_dirs
+
+def detect_ts_test_dirs_with_provenance(repo_dir: Path) -> tuple[list[Path], str]:
+    """Like :func:`detect_ts_test_dirs` but also returns the detection heuristic used.
+
+    Heuristic name is one of: ``"config"``, ``"recursive-scan"``, ``"none"``.
+    """
+    config_dirs = _detect_test_dirs_from_config(repo_dir)
+    if config_dirs:
+        return config_dirs, "config"
+    scan_dirs = _detect_test_dirs_recursive_scan(repo_dir)
+    if scan_dirs:
+        return scan_dirs, "recursive-scan"
+    return [], "none"
 
 
 def detect_package_manager(repo_dir: Path) -> str:
@@ -323,11 +540,15 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
         except (json.JSONDecodeError, OSError):
             pass
 
-    test_dirs = detect_ts_test_dirs(repo_dir)
+    test_dirs, test_dir_detected_by = detect_ts_test_dirs_with_provenance(repo_dir)
     if test_dirs:
         test_dir = test_dirs[0].name
     else:
-        test_dir = "__tests__"
+        raise RuntimeError(
+            f"Could not detect a test directory for {repo_dir.name}. "
+            "Inspect package.json (jest/vitest/mocha), jest.config.*, vitest.config.*, "
+            ".mocharc.*, or the filesystem layout and set test_dir manually in the entries JSON."
+        )
 
     spec_url = _detect_spec_url(repo_dir)
 
@@ -348,6 +569,7 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
     test_dict = {
         "test_cmd": test_cmd,
         "test_dir": test_dir,
+        "test_dir_detected_by": test_dir_detected_by,
     }
 
     return setup_dict, test_dict, test_framework
@@ -382,14 +604,14 @@ def create_ts_stubbed_branch(
     full_name: str,
     src_dir: str,
     branch_name: str = TS_DATASET_BRANCH,
-) -> tuple[str, str]:
+) -> tuple[str, str, int]:
     """Create the commit0 branch with stubbed TypeScript code.
 
     Mirrors create_stubbed_branch from prepare_repo.py (lines 265-422).
 
     Returns
     -------
-        (base_commit_sha, reference_commit_sha)
+        (base_commit_sha, reference_commit_sha, functions_stubbed)
 
     """
     default_branch = get_default_branch(repo_dir)
@@ -461,33 +683,44 @@ def create_ts_stubbed_branch(
     status = git(repo_dir, "status", "--porcelain")
     if not status:
         logger.warning("  No changes after stubbing -- source may already be stubs?")
-        return reference_commit, reference_commit
+        return reference_commit, reference_commit, 0
 
-    diff_patch = git(repo_dir, "diff", "--cached")
-    additions = sum(
-        1
-        for line in diff_patch.splitlines()
-        if line.startswith("+") and not line.startswith("+++")
-    )
-    deletions = sum(
-        1
-        for line in diff_patch.splitlines()
-        if line.startswith("-") and not line.startswith("---")
-    )
-    logger.info("  Diff stats -- lines added: %d, removed: %d", additions, deletions)
-
-    if additions == 0 or deletions == 0:
+    functions_stubbed = report.get("functions_stubbed", 0)
+    if functions_stubbed == 0:
         raise RuntimeError(
-            f"Stubbing verification failed for {full_name}: "
-            f"additions={additions}, deletions={deletions}. "
-            f"Expected both > 0."
+            f"No functions were stubbed for {full_name}; aborting pipeline"
+            "Running the agent on a repo with zero stubs is wasteful and inflates pass "
+            "rates with trivial baselines. Investigate the stubber output above."
+        )
+
+    diff_ts = git(
+        repo_dir, "diff", "--cached", "--unified=0", "--", "*.ts", "*.tsx"
+    )
+    stub_marker_count = sum(
+        1
+        for line in diff_ts.splitlines()
+        if line.startswith("+")
+        and not line.startswith("+++")
+        and 'throw new Error("STUB")' in line
+    )
+    logger.info(
+        "  Stub verification -- .ts/.tsx STUB markers added: %d (expected >= 1)",
+        stub_marker_count,
+    )
+
+    if stub_marker_count < 1:
+        raise RuntimeError(
+            f"Stubbing verification failed for {full_name}: functions_stubbed="
+            f"{functions_stubbed} but the staged .ts/.tsx diff contains zero "
+            'added lines matching `throw new Error("STUB")`. The '
+            "apparent stubs did not land in TypeScript source files."
         )
 
     git(repo_dir, "commit", "-m", "Commit 0")
     base_commit = get_head_sha(repo_dir)
     logger.info("  Base commit (stubbed): %s", base_commit[:12])
 
-    return base_commit, reference_commit
+    return base_commit, reference_commit, functions_stubbed
 
 
 def prepare_ts_repo(
@@ -531,7 +764,7 @@ def prepare_ts_repo(
         setup_dict["install"].split()[0],
     )
 
-    base_commit, reference_commit = create_ts_stubbed_branch(
+    base_commit, reference_commit, functions_stubbed = create_ts_stubbed_branch(
         repo_dir, full_name, src_dir
     )
 
@@ -549,6 +782,7 @@ def prepare_ts_repo(
         "src_dir": src_dir,
         "language": "typescript",
         "test_framework": test_framework,
+        "functions_stubbed": functions_stubbed,
         "setup": setup_dict,
         "test": test_dict,
     }
