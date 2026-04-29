@@ -38,7 +38,7 @@ REPO_SPLIT_OVERRIDE=""
 STAGE_TIMEOUT=0
 EVAL_TIMEOUT=3600
 NO_STAGE3_LINT="false"
-USE_SPEC_INFO="false"
+USE_SPEC_INFO="true"
 INACTIVITY_TIMEOUT=900
 MAX_WALL_TIME=86400
 SKIP_TO_STAGE=""
@@ -61,7 +61,7 @@ Options:
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
   --no-stage3-lint           Disable lint in Stage 3
-  --use-spec-info            Enable spec doc provisioning (disabled by default for Go)
+  --no-spec-info             Disable spec doc provisioning (enabled by default for Go)
   --inactivity-timeout <s>   Kill agent if no log activity for N seconds (default: 900)
   --max-wall-time  <secs>    Absolute per-stage wall-time cap (default: 86400)
   --num-samples    <n>       Number of independent samples (default: 1)
@@ -82,7 +82,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";  shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";           shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
-        --use-spec-info) USE_SPEC_INFO="true"; shift ;;
+        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -192,7 +192,7 @@ if [[ -z "$BRANCH_OVERRIDE" ]] && [[ "$NO_STAGE3_LINT" == "true" ]]; then
     BASE_BRANCH_NAME="${BASE_BRANCH_NAME}-nolint-s3"
 fi
 
-BASE_RUN_ID_FLAT=$(echo "go_${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
+BASE_RUN_ID_FLAT=$(echo "${MODEL_SHORT}_${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
 DATASET_DIR_NAME=$(echo "${DATASET_SHORT}" | tr -dc 'a-zA-Z0-9._-')
 MODEL_DIR_NAME=$(echo "${MODEL_SHORT}" | tr -dc 'a-zA-Z0-9._-')
 if [[ "$NO_STAGE3_LINT" == "true" ]]; then
@@ -396,6 +396,175 @@ EOF
 AGENT_PID=""
 AGENT_ELAPSED=0
 AGENT_RC=0
+
+
+# ============================================================
+# Spec Doc Provisioning (Go)
+# ============================================================
+
+ensure_spec_docs_go() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        log "  Spec docs disabled — skipping."
+        return 0
+    fi
+
+    log "Ensuring spec docs are available for all Go repos..."
+
+    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE" "$BASE_DIR" <<'PYEOF'
+import json, os, sys, shutil, subprocess, bz2
+from pathlib import Path
+
+dataset_file = sys.argv[1]
+repo_base    = sys.argv[2]
+base_dir     = sys.argv[3]
+
+# Load dataset
+if dataset_file.endswith(".json") or os.path.isfile(dataset_file):
+    with open(dataset_file) as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "data" in data:
+        entries = data["data"]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = []
+else:
+    entries = []
+
+if not entries:
+    print("  No dataset entries found — skipping spec provisioning.")
+    sys.exit(0)
+
+specs_dir = os.path.join(base_dir, "specs")
+os.makedirs(specs_dir, exist_ok=True)
+
+for entry in entries:
+    repo = entry.get("repo", "")
+    repo_name = repo.split("/")[-1]
+    repo_dir = os.path.join(repo_base, repo_name)
+
+    if not os.path.isdir(repo_dir):
+        print(f"  SKIP {repo_name}: repo dir not found at {repo_dir}")
+        continue
+
+    bz2_in_repo = os.path.join(repo_dir, "spec.pdf.bz2")
+    pdf_in_repo = os.path.join(repo_dir, "spec.pdf")
+
+    if os.path.exists(bz2_in_repo) or os.path.exists(pdf_in_repo):
+        print(f"  OK   {repo_name}: spec already present")
+        continue
+
+    spec_url = None
+    setup = entry.get("setup", {})
+    if isinstance(setup, dict):
+        spec_url = setup.get("specification")
+    if not spec_url:
+        print(f"  SKIP {repo_name}: no specification URL in dataset entry")
+        continue
+
+    cached_bz2 = os.path.join(specs_dir, f"{repo_name}.pdf.bz2")
+    cached_pdf = os.path.join(specs_dir, f"{repo_name}.pdf")
+
+    if os.path.exists(cached_bz2):
+        shutil.copy2(cached_bz2, bz2_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_bz2}")
+        continue
+    if os.path.exists(cached_pdf):
+        shutil.copy2(cached_pdf, pdf_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_pdf}")
+        continue
+
+    print(f"  SCRAPE {repo_name}: {spec_url}")
+    try:
+        from tools.scrape_pdf import scrape_spec
+        result = scrape_spec(
+            base_url=spec_url,
+            name=repo_name,
+            output_dir=specs_dir,
+            compress=True,
+        )
+        if result and os.path.exists(result):
+            shutil.copy2(result, bz2_in_repo)
+            print(f"  OK   {repo_name}: scraped and placed spec.pdf.bz2")
+        else:
+            print(f"  WARN {repo_name}: scrape returned no output")
+    except Exception as e:
+        print(f"  WARN {repo_name}: scrape failed: {e}")
+
+PYEOF
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "  WARNING: Spec doc provisioning had errors (rc=$rc) — continuing anyway."
+    fi
+}
+
+verify_spec_docs_go() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        return 0
+    fi
+
+    log "Verifying all Go repos have spec docs..."
+
+    local missing=0
+    local missing_repos=""
+
+    local repo_list
+    if [[ "$DATASET_FILE" != wentingzhao/* ]] && [[ -f "$DATASET_FILE" ]]; then
+        repo_list=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    else
+        repo_list=$("$VENV_PYTHON" -c "
+from commit0.harness.constants_go import GO_SPLIT
+for r in sorted(GO_SPLIT.get('${REPO_SPLIT}', [])):
+    print(r)
+" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$repo_list" ]]; then
+        log "  WARNING: Could not enumerate repos for spec verification."
+        return 0
+    fi
+
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        local repo_dir="${REPO_BASE}/${repo}"
+        if [[ ! -d "$repo_dir" ]]; then
+            continue
+        fi
+        if [[ ! -f "${repo_dir}/spec.pdf" ]] && [[ ! -f "${repo_dir}/spec.pdf.bz2" ]]; then
+            log "  MISSING spec: ${repo}"
+            missing=$((missing + 1))
+            missing_repos="${missing_repos}  - ${repo}\n"
+        else
+            log "  OK spec: ${repo}"
+        fi
+    done <<< "$repo_list"
+
+    if [[ "$missing" -gt 0 ]]; then
+        log ""
+        log "======================================================================"
+        log "FATAL: ${missing} Go repo(s) missing spec docs (use_spec_info=true)."
+        log "  The pipeline requires spec docs for all repos when use_spec_info"
+        log "  is true (default). Missing repos:"
+        echo -e "$missing_repos" | while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done
+        log ""
+        log "  Options:"
+        log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
+        log "    2. Add 'specification' URLs to the dataset JSON and re-run"
+        log "    3. Pass --no-spec-info to run without spec context"
+        log "======================================================================"
+        return 1
+    fi
+
+    log "  All Go repos have spec docs. ✓"
+}
 
 watchdog_run() {
     local agent_pid="$1"
@@ -1028,6 +1197,13 @@ run_single_sample() {
 
     mkdir -p "$LOG_BASE"
     write_commit0_config
+
+    if [[ "$sample_idx" -eq 1 ]]; then
+        ensure_spec_docs_go
+        if ! verify_spec_docs_go; then
+            return 1
+        fi
+    fi
 
     if [[ -n "$SKIP_TO_STAGE" ]]; then
         if [[ ! -f "$PIPELINE_LOG" ]]; then
