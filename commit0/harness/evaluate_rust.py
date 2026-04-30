@@ -206,7 +206,7 @@ def main(
         )
         log_dirs.append(str(log_dir))
         triples.append(
-            (example["repo"], test_dir, repo_branch)
+            (example["repo"], "", repo_branch)
         )
 
     if not triples:
@@ -227,7 +227,7 @@ def main(
     with tqdm(total=len(triples), smoothing=0, desc="Evaluating Rust repos") as pbar:
         with ThreadPoolExecutor(max_workers=num_workers) as executor:
             futures = {}
-            for repo, test_dir, repo_branch in triples:
+            for repo, test_ids, repo_branch in triples:
                 future = executor.submit(
                     run_rust_tests,
                     dataset_name,
@@ -235,7 +235,7 @@ def main(
                     base_dir,
                     repo,
                     repo_branch,
-                    test_dir,
+                    test_ids,
                     backend,
                     timeout,
                     num_cpus,

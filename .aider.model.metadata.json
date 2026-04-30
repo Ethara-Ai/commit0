@@ -16,8 +16,8 @@
   },
   "bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/1ziwaxsu12qb": {
     "max_input_tokens": 202752,
-    "max_output_tokens": 128000,
-    "max_tokens": 128000,
+    "max_output_tokens": 32768,
+    "max_tokens": 32768,
     "mode": "chat",
     "edit_format": "diff",
     "input_cost_per_token": 1e-06,

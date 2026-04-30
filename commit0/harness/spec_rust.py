@@ -66,10 +66,18 @@ class RustSpec(Spec):
         return [
             f"cd {self.repo_directory}",
             f"git reset --hard {self.instance['base_commit']}",
-            f"git apply --allow-empty -v {diff_path}",
+            # Apply patch: skip if empty, abort eval gracefully if apply fails
+            f"if [ -s {diff_path} ]; then",
+            f"  git apply -v {diff_path}",
+            "  if [ $? -ne 0 ]; then",
+            '    echo "PATCH APPLY FAILED" > test_output.txt',
+            "    echo 1 > cargo_test_exit_code.txt",
+            "    exit 0",
+            "  fi",
+            "fi",
             "git status",
             f"{test_cmd} {{test_ids}} > test_output.txt 2>&1",
-            "echo $? > test_exit_code.txt",
+            "echo $? > cargo_test_exit_code.txt",
         ]
 
 

@@ -36,7 +36,7 @@
   examples_as_sys_msg: false
   use_temperature: false
   extra_params:
-    max_tokens: 128000
+    max_tokens: 32768
 
 - name: bedrock/converse/arn:aws:bedrock:us-east-1:426628337772:application-inference-profile/5m69567zugvx
   edit_format: diff

@@ -15,8 +15,14 @@ rust_agent_app = typer.Typer(
     add_completion=False,
     context_settings={"help_option_names": ["-h", "--help"]},
     pretty_exceptions_show_locals=False,
+    invoke_without_command=True,
     help="Run the aider agent on Rust Commit-0 repositories.",
 )
+
+
+@rust_agent_app.callback()
+def main() -> None:
+    """Rust agent CLI — use 'run' subcommand."""
 
 
 @rust_agent_app.command()

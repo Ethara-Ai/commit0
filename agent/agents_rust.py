@@ -98,6 +98,7 @@ class RustAiderAgents(AiderAgents):
                 test_cmd=test_cmd,
                 io=io,
                 cache_prompts=self.cache_prompts,
+                detect_urls=False,  # Prevent aider from scraping URLs in lint/test output
             )
             coder.max_reflections = self.max_iteration
             coder.stream = True

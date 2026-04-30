@@ -490,7 +490,7 @@ def prepare_rust_repo(
     repo_name = upstream.split("/")[-1]
 
     if clone_dir is None:
-        clone_dir = Path("/tmp")
+        clone_dir = Path("repos")
 
     logger.info("=" * 60)
     logger.info("Preparing: %s (crate: %s)", upstream, crate)
@@ -638,8 +638,8 @@ def main() -> None:
     parser.add_argument(
         "--clone-dir",
         type=Path,
-        default=Path("/tmp"),
-        help="Directory for local clones (default: /tmp)",
+        default=Path("repos"),
+        help="Directory for local clones (default: ./repos)",
     )
     parser.add_argument(
         "--dry-run",

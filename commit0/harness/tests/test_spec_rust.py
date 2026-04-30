@@ -242,7 +242,7 @@ class TestRustSpecMakeEvalScriptList:
     def test_captures_exit_code(self):
         spec = _make_spec()
         scripts = spec.make_eval_script_list()
-        assert any("test_exit_code.txt" in s for s in scripts)
+        assert any("cargo_test_exit_code.txt" in s for s in scripts)
 
     def test_captures_test_output(self):
         spec = _make_spec()
@@ -387,7 +387,7 @@ class TestRustSpecEvalScriptEdge:
     def test_eval_script_contains_exit_code(self):
         spec = _make_spec()
         scripts = spec.make_eval_script_list()
-        assert any("test_exit_code.txt" in s for s in scripts)
+        assert any("cargo_test_exit_code.txt" in s for s in scripts)
 
     def test_eval_script_absolute_uses_slash_patch(self):
         spec = _make_spec(absolute=True)

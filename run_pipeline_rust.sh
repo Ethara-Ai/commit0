@@ -237,10 +237,13 @@ resolve_dataset() {
         if [[ -n "$REPO_SPLIT_OVERRIDE" ]]; then
             REPO_SPLIT="$REPO_SPLIT_OVERRIDE"
         else
-            # Extract repo name from <name>_dataset.json pattern
+            # Extract repo name from <name>_rust_dataset.json pattern
+            # Strip _dataset suffix, then strip _rust suffix so repo_split
+            # matches the actual repo name (e.g. "grex" not "grex_rust").
             local basename
             basename=$(basename "$arg" .json)
             basename="${basename%_dataset}"
+            basename="${basename%_rust}"
             REPO_SPLIT="$basename"
         fi
         DATASET_SHORT=$(basename "$arg" .json)
@@ -251,7 +254,9 @@ resolve_dataset() {
     local candidate="${BASE_DIR}/${arg}_dataset.json"
     if [[ -f "$candidate" ]]; then
         DATASET_FILE="$candidate"
-        REPO_SPLIT="${REPO_SPLIT_OVERRIDE:-$arg}"
+        local _rs="${REPO_SPLIT_OVERRIDE:-$arg}"
+        _rs="${_rs%_rust}"
+        REPO_SPLIT="$_rs"
         DATASET_SHORT="${arg}"
         return
     fi
@@ -818,13 +823,13 @@ run_evaluate() {
     local stage_label="${2:-eval}"
 
     local cmd=(
-        "$VENV_PYTHON" -m commit0 evaluate
-        --branch "$branch"
-        --backend "$BACKEND"
-        --timeout 300
-        --num-cpus 1
-        --num-workers 1
-        --commit0-config-file "$COMMIT0_CONFIG"
+        "$VENV_PYTHON" commit0/cli_rust.py evaluate \
+            --branch "$branch" \
+            --backend "$BACKEND" \
+            --timeout 300 \
+            --num-cpus 1 \
+            --num-workers 1 \
+            --commit0-config-file "$COMMIT0_CONFIG"
     )
 
     local eval_log="${LOG_BASE}/${stage_label}_eval.log"

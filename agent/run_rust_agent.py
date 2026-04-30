@@ -22,6 +22,7 @@ from tqdm import tqdm
 from agent.agent_utils import create_branch, get_lint_cmd, load_agent_config
 from agent.agent_utils_rust import (
     extract_rust_function_stubs,
+    find_rust_files_to_edit,
     get_target_edit_files_rust,
     get_rust_test_ids,
 )
@@ -99,8 +100,15 @@ def get_rust_message(
 
 
 def get_rust_lint_cmd(repo_path: str) -> str:
-    """Return the cargo clippy lint command for the repo at *repo_path*."""
-    return "cargo clippy --all-targets --all-features -- -D warnings"
+    """Return the cargo clippy lint command for the repo at *repo_path*.
+
+    NOTE: aider's Linter.run_cmd() always appends the filename to the command
+    (``cmd += " " + quote(fname)``).  ``cargo clippy`` does not accept source
+    file arguments — it lints the whole crate.  We use ``bash -c '...' --`` so
+    the appended filename is harmlessly consumed as a positional arg to bash
+    (after ``--``) instead of being passed to cargo.
+    """
+    return "bash -c 'cargo clippy --all-targets --all-features -- -D warnings' --"
 
 
 # ---------------------------------------------------------------------------
@@ -180,6 +188,7 @@ def run_rust_agent_for_repo(
         local_repo.git.reset("--hard", example["base_commit"])
 
     target_edit_files = get_target_edit_files_rust(repo_path)
+    all_source_files = find_rust_files_to_edit(repo_path)
     import_dependencies: dict = {}
 
     test_ids = get_rust_test_ids(repo_path)
@@ -224,7 +233,7 @@ def run_rust_agent_for_repo(
             raise ValueError("Invalid input")
 
         if agent_config.run_tests:
-            for src_file in target_edit_files:
+            for src_file in all_source_files:
                 src_file_name = os.path.relpath(src_file, repo_path).replace(".rs", "").replace("/", "__")
                 test_log_dir = experiment_log_dir / src_file_name
 
@@ -247,7 +256,7 @@ def run_rust_agent_for_repo(
                     "",
                     test_cmd,
                     lint_cmd,
-                    target_edit_files,
+                    all_source_files,
                     test_log_dir,
                     test_first=True,
                     thinking_capture=thinking_capture,
@@ -291,13 +300,13 @@ def run_rust_agent_for_repo(
 
         elif agent_config.run_entire_dir_lint:
             message, spec_costs = get_rust_message(
-                agent_config, repo_path, target_files=target_edit_files
+                agent_config, repo_path, target_files=all_source_files
             )
             if thinking_capture is not None:
                 for c in spec_costs:
                     thinking_capture.summarizer_costs.add(c)
 
-            lint_files = target_edit_files
+            lint_files = all_source_files
             for lint_file in lint_files:
                 lint_file_name = os.path.relpath(lint_file, repo_path).replace(".rs", "").replace("/", "__")
                 lint_log_dir = experiment_log_dir / lint_file_name

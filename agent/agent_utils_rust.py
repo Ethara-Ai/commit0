@@ -190,7 +190,7 @@ def get_rust_test_ids(repo_path: str) -> list[str]:
 
     try:
         result = subprocess.run(
-            ["cargo", "test", "--list"],
+            ["cargo", "test", "--", "--list"],
             capture_output=True,
             text=True,
             cwd=repo_path,
@@ -221,6 +221,7 @@ def get_rust_test_ids(repo_path: str) -> list[str]:
 
     repo_name = os.path.basename(os.path.normpath(repo_path))
     cache_path = RUST_TEST_IDS_DIR / f"{repo_name}.json"
+    cache_path_bz2 = RUST_TEST_IDS_DIR / f"{repo_name}.bz2"
     if cache_path.exists():
         try:
             cached = json.loads(cache_path.read_text(encoding="utf-8"))
@@ -233,6 +234,21 @@ def get_rust_test_ids(repo_path: str) -> list[str]:
         except (json.JSONDecodeError, OSError) as exc:
             logger.warning(
                 "Failed to load cached test IDs from %s: %s", cache_path, exc
+            )
+    elif cache_path_bz2.exists():
+        try:
+            raw = bz2.decompress(cache_path_bz2.read_bytes()).decode("utf-8")
+            test_ids = [line.strip() for line in raw.splitlines() if line.strip()]
+            if test_ids:
+                logger.info(
+                    "Loaded %d cached test IDs from bz2 for %s",
+                    len(test_ids),
+                    repo_name,
+                )
+                return sorted(test_ids)
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "Failed to load cached test IDs from %s: %s", cache_path_bz2, exc
             )
     return sorted(test_ids)
 

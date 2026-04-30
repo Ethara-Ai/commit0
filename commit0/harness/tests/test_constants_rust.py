@@ -122,10 +122,12 @@ class TestRustSplit:
         for repo in RUST_SPLIT["all"]:
             assert "/" in repo, f"Repo {repo} missing org/name format"
 
-    def test_all_repos_start_with_rust_commit0(self):
+    def test_all_repos_have_valid_org(self):
+        allowed_orgs = {"Rust-commit0", "Ethara-Ai"}
         for repo in RUST_SPLIT["all"]:
-            assert repo.startswith("Rust-commit0/"), (
-                f"Repo {repo} not in Rust-commit0 org"
+            org = repo.split("/")[0]
+            assert org in allowed_orgs, (
+                f"Repo {repo} not in an allowed org: {allowed_orgs}"
             )
 
     def test_taffy_in_all(self):
@@ -151,7 +153,7 @@ class TestRustSplit:
         assert len(repos) == len(set(repos))
 
     def test_repo_count(self):
-        assert len(RUST_SPLIT["all"]) == 6
+        assert len(RUST_SPLIT["all"]) == 9
 
     def test_no_empty_repo_names(self):
         for repo in RUST_SPLIT["all"]:
