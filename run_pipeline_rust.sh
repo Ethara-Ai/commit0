@@ -30,9 +30,9 @@ VENV_PYTHON="${BASE_DIR}/.venv/bin/python"
 BACKEND="local"
 MAX_ITERATION=3
 
-# Rust pipeline — hardcoded language and no spec info
+# Rust pipeline — spec info enabled by default (use --no-spec-info to disable)
 LANGUAGE="rust"
-USE_SPEC_INFO="false"
+USE_SPEC_INFO="true"
 
 # ============================================================
 # Argument Parsing
@@ -80,6 +80,7 @@ Options:
   --max-wall-time  <secs>    Absolute per-stage wall-time cap in seconds (default: 86400, 0=disable)
   --eval-timeout   <secs>    Eval timeout in seconds (default: 3600)
   --backend        <name>    Backend: local or modal (default: local)
+  --no-spec-info             Disable spec/paper injection (default: enabled)
   --no-stage3-lint           Disable lint in Stage 3 (for ablation experiments)
   --num-samples    <n>       Number of independent samples to run, pass@k (default: 1)
   --skip-to-stage  <1|2|3>   Skip to stage N (reuse prior stages from existing branch)
@@ -99,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --eval-timeout)  [[ $# -lt 2 ]] && { echo "Error: --eval-timeout requires a value"; exit 1; }; EVAL_TIMEOUT="$2";      shift 2 ;;
         --backend)     [[ $# -lt 2 ]] && { echo "Error: --backend requires a value"; exit 1; }; BACKEND="$2";             shift 2 ;;
         --no-stage3-lint) NO_STAGE3_LINT="true"; shift ;;
+        --no-spec-info) USE_SPEC_INFO="false"; shift ;;
         --inactivity-timeout) [[ $# -lt 2 ]] && { echo "Error: --inactivity-timeout requires a value"; exit 1; }; INACTIVITY_TIMEOUT="$2"; shift 2 ;;
         --max-wall-time) [[ $# -lt 2 ]] && { echo "Error: --max-wall-time requires a value"; exit 1; }; MAX_WALL_TIME="$2"; shift 2 ;;
         --num-samples) [[ $# -lt 2 ]] && { echo "Error: --num-samples requires a value"; exit 1; }; NUM_SAMPLES="$2"; shift 2 ;;
@@ -395,6 +397,183 @@ get_newest_aider_log() {
 }
 
 # ============================================================
+# Spec Doc Provisioning
+# ============================================================
+
+ensure_spec_docs_rust() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        log "  Spec docs disabled — skipping."
+        return 0
+    fi
+
+    log "Ensuring spec docs are available for all Rust repos..."
+
+    "$VENV_PYTHON" - "$DATASET_FILE" "$REPO_BASE" "$BASE_DIR" <<'PYEOF'
+import json, os, sys, shutil
+from pathlib import Path
+
+dataset_file = sys.argv[1]
+repo_base    = sys.argv[2]
+base_dir     = sys.argv[3]
+
+if dataset_file.endswith(".json") or os.path.isfile(dataset_file):
+    with open(dataset_file) as f:
+        data = json.load(f)
+    if isinstance(data, dict) and "data" in data:
+        entries = data["data"]
+    elif isinstance(data, list):
+        entries = data
+    else:
+        entries = []
+else:
+    entries = []
+
+if not entries:
+    print("  No dataset entries found — skipping spec provisioning.")
+    sys.exit(0)
+
+specs_dir = os.path.join(base_dir, "specs_rust")
+os.makedirs(specs_dir, exist_ok=True)
+
+for entry in entries:
+    repo = entry.get("repo", "")
+    repo_name = repo.split("/")[-1]
+    repo_dir = os.path.join(repo_base, repo_name)
+
+    if not os.path.isdir(repo_dir):
+        print(f"  SKIP {repo_name}: repo dir not found at {repo_dir}")
+        continue
+
+    bz2_in_repo = os.path.join(repo_dir, "spec.pdf.bz2")
+    pdf_in_repo = os.path.join(repo_dir, "spec.pdf")
+
+    if os.path.exists(bz2_in_repo) or os.path.exists(pdf_in_repo):
+        print(f"  OK   {repo_name}: spec already present")
+        continue
+
+    spec_ref = None
+    setup = entry.get("setup", {})
+    if isinstance(setup, dict):
+        spec_ref = setup.get("specification")
+    if not spec_ref:
+        print(f"  SKIP {repo_name}: no specification in dataset entry")
+        continue
+
+    cached_bz2 = os.path.join(specs_dir, f"{repo_name}.pdf.bz2")
+    cached_pdf = os.path.join(specs_dir, f"{repo_name}.pdf")
+
+    if spec_ref and not spec_ref.startswith("http"):
+        local_path = os.path.join(specs_dir, spec_ref)
+        if os.path.exists(local_path):
+            shutil.copy2(local_path, bz2_in_repo if local_path.endswith(".bz2") else pdf_in_repo)
+            print(f"  OK   {repo_name}: copied local spec from {local_path}")
+            continue
+
+    if os.path.exists(cached_bz2):
+        shutil.copy2(cached_bz2, bz2_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_bz2}")
+        continue
+    if os.path.exists(cached_pdf):
+        shutil.copy2(cached_pdf, pdf_in_repo)
+        print(f"  OK   {repo_name}: copied cached spec from {cached_pdf}")
+        continue
+
+    if spec_ref.startswith("http"):
+        print(f"  SCRAPE {repo_name}: {spec_ref}")
+        try:
+            from tools.scrape_pdf import scrape_spec
+            result = scrape_spec(
+                base_url=spec_ref,
+                name=repo_name,
+                output_dir=specs_dir,
+                compress=True,
+            )
+            if result and os.path.exists(result):
+                shutil.copy2(result, bz2_in_repo)
+                print(f"  OK   {repo_name}: scraped and placed spec.pdf.bz2")
+            else:
+                print(f"  WARN {repo_name}: scrape returned no output")
+        except Exception as e:
+            print(f"  WARN {repo_name}: scrape failed: {e}")
+    else:
+        print(f"  WARN {repo_name}: spec '{spec_ref}' not found in {specs_dir}")
+
+PYEOF
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        log "  WARNING: Spec doc provisioning had errors (rc=$rc) — continuing anyway."
+    fi
+}
+
+verify_spec_docs_rust() {
+    if [[ "$USE_SPEC_INFO" != "true" ]]; then
+        return 0
+    fi
+
+    log "Verifying all Rust repos have spec docs..."
+
+    local missing=0
+    local missing_repos=""
+
+    local repo_list
+    if [[ -f "$DATASET_FILE" ]]; then
+        repo_list=$(_PIPELINE_DATASET_FILE="$DATASET_FILE" "$VENV_PYTHON" -c "
+import json, os
+with open(os.environ['_PIPELINE_DATASET_FILE']) as f:
+    data = json.load(f)
+if isinstance(data, dict) and 'data' in data:
+    data = data['data']
+for item in data:
+    print(item['repo'].split('/')[-1])
+" 2>/dev/null || true)
+    else
+        repo_list=$("$VENV_PYTHON" -c "
+from commit0.harness.constants_rust import RUST_SPLIT
+for r in sorted(RUST_SPLIT.get('${REPO_SPLIT}', [])):
+    print(r)
+" 2>/dev/null || true)
+    fi
+
+    if [[ -z "$repo_list" ]]; then
+        log "  WARNING: Could not enumerate repos for spec verification."
+        return 0
+    fi
+
+    while IFS= read -r repo; do
+        [[ -z "$repo" ]] && continue
+        local repo_dir="${REPO_BASE}/${repo}"
+        if [[ ! -d "$repo_dir" ]]; then
+            continue
+        fi
+        if [[ ! -f "${repo_dir}/spec.pdf" ]] && [[ ! -f "${repo_dir}/spec.pdf.bz2" ]]; then
+            log "  MISSING spec: ${repo}"
+            missing=$((missing + 1))
+            missing_repos="${missing_repos}  - ${repo}\n"
+        else
+            log "  OK spec: ${repo}"
+        fi
+    done <<< "$repo_list"
+
+    if [[ "$missing" -gt 0 ]]; then
+        log ""
+        log "======================================================================"
+        log "FATAL: ${missing} Rust repo(s) missing spec docs (use_spec_info=true)."
+        log "  The pipeline requires spec docs for all repos when use_spec_info"
+        log "  is true (default). Missing repos:"
+        echo -e "$missing_repos" | while IFS= read -r line; do [[ -n "$line" ]] && log "$line"; done
+        log ""
+        log "  Options:"
+        log "    1. Place spec.pdf or spec.pdf.bz2 in each repo directory"
+        log "    2. Add 'specification' entries to the dataset JSON and re-run"
+        log "    3. Pass --no-spec-info to run without spec context"
+        log "======================================================================"
+        return 1
+    fi
+
+    log "  All Rust repos have spec docs. ✓"
+}
+
+# ============================================================
 # Config Writers
 # ============================================================
 
@@ -427,6 +606,7 @@ write_agent_config() {
     local run_entire_dir_lint="$3"
     local use_unit_tests_info="$4"
     local add_import_module_to_context="$5"
+    local use_spec_info="${6:-false}"
 
     local user_prompt='Here is your task:
 
@@ -458,7 +638,7 @@ use_repo_info: false
 max_repo_info_length: 10000
 use_unit_tests_info: ${use_unit_tests_info}
 max_unit_tests_info_length: 10000
-use_spec_info: false
+use_spec_info: ${use_spec_info}
 max_spec_info_length: 10000
 spec_summary_max_tokens: 4000
 use_lint_info: ${use_lint_info}
@@ -873,7 +1053,7 @@ stage_1_draft() {
     log "STAGE 1: Draft Initial Implementations"
     log "======================================================================"
 
-    write_agent_config "false" "false" "false" "true" "false"
+    write_agent_config "false" "false" "false" "true" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage1_draft"
     mkdir -p "$stage_log_dir"
@@ -921,7 +1101,7 @@ stage_2_lint_refine() {
     log "STAGE 2: Refine with Static Analysis (Lint)"
     log "======================================================================"
 
-    write_agent_config "false" "true" "true" "false" "false"
+    write_agent_config "false" "true" "true" "false" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage2_lint"
     mkdir -p "$stage_log_dir"
@@ -982,7 +1162,7 @@ stage_3_test_refine() {
         log "  Stage 3 lint DISABLED (--no-stage3-lint)"
     fi
 
-    write_agent_config "true" "$s3_lint" "false" "false" "false"
+    write_agent_config "true" "$s3_lint" "false" "false" "false" "$USE_SPEC_INFO"
 
     local stage_log_dir="${LOG_BASE}/stage3_tests"
     mkdir -p "$stage_log_dir"
@@ -1169,6 +1349,13 @@ run_single_sample() {
     fi
 
     write_commit0_config
+
+    if [[ "$sample_idx" -eq 1 ]]; then
+        ensure_spec_docs_rust
+        if ! verify_spec_docs_rust; then
+            return 1
+        fi
+    fi
 
     if [[ -n "$SKIP_TO_STAGE" ]]; then
         if [[ ! -f "$PIPELINE_LOG" ]]; then

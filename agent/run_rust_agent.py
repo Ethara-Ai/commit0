@@ -45,6 +45,40 @@ _RUST_PROMPT_PATH = Path(__file__).parent / "prompts" / "rust_system_prompt.md"
 # ---------------------------------------------------------------------------
 
 
+def _load_spec_text(repo_path: str) -> str:
+    """Read spec PDF from repo dir, decompressing bz2 if needed. Returns raw text or ''."""
+    import bz2
+
+    spec_pdf = Path(repo_path) / "spec.pdf"
+    spec_bz2 = Path(repo_path) / "spec.pdf.bz2"
+
+    if spec_bz2.exists() and not spec_pdf.exists():
+        try:
+            with bz2.open(str(spec_bz2), "rb") as fin:
+                with open(str(spec_pdf), "wb") as fout:
+                    fout.write(fin.read())
+        except Exception as exc:
+            logger.warning("Failed to decompress %s: %s", spec_bz2, exc)
+            if spec_pdf.exists():
+                spec_pdf.unlink()
+            return ""
+
+    if not spec_pdf.exists():
+        return ""
+
+    try:
+        import fitz
+
+        raw = ""
+        with fitz.open(spec_pdf) as doc:
+            for page in doc:
+                raw += page.get_text()  # type: ignore[attr-defined]
+        return raw
+    except Exception as exc:
+        logger.warning("Failed to extract spec PDF text: %s", exc)
+        return ""
+
+
 def get_rust_message(
     agent_config: AgentConfig,
     repo_path: str,
@@ -96,7 +130,49 @@ def get_rust_message(
     if agent_config.use_user_prompt and agent_config.user_prompt:
         message = agent_config.user_prompt + "\n\n" + message
 
-    return message, []
+    spec_costs: list[SummarizerCost] = []
+    if agent_config.use_spec_info:
+        spec_text = _load_spec_text(repo_path)
+        if spec_text and len(spec_text) > 200:
+            if len(spec_text) > int(agent_config.max_spec_info_length * 1.5):
+                try:
+                    from agent.agent_utils import summarize_specification
+
+                    spec_pdf_path = Path(repo_path) / "spec.pdf"
+                    processed_spec, spec_costs = summarize_specification(
+                        spec_text=spec_text,
+                        model=agent_config.model_name,
+                        max_tokens=agent_config.spec_summary_max_tokens,
+                        max_char_length=agent_config.max_spec_info_length,
+                        cache_path=spec_pdf_path.parent / ".spec_summary_cache.json",
+                    )
+                except Exception as exc:
+                    logger.warning("Spec summarization failed: %s", exc)
+                    processed_spec = spec_text[: agent_config.max_spec_info_length]
+            else:
+                processed_spec = spec_text
+            message += (
+                "\n\n>>> Here is the Specification Information:\n" + processed_spec
+            )
+        else:
+            for readme_name in ["README.md", "README.rst", "README.txt", "README"]:
+                readme_path = Path(repo_path) / readme_name
+                if readme_path.exists():
+                    try:
+                        readme_text = readme_path.read_text(errors="replace")
+                        readme_text = readme_text[: agent_config.max_spec_info_length]
+                        message += (
+                            "\n\n>>> Here is the Specification Information:\n"
+                            + readme_text
+                        )
+                        logger.info(
+                            "Using %s as spec fallback for %s", readme_name, repo_path
+                        )
+                        break
+                    except Exception as exc:
+                        logger.warning("Failed to read %s: %s", readme_path, exc)
+
+    return message, spec_costs
 
 
 def get_rust_lint_cmd(repo_path: str) -> str:
