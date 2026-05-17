@@ -571,7 +571,7 @@ def _generate_readme_spec_pdf(
         logger.info("  No README found for %s — skipping README spec fallback", repo_name)
         return None
 
-    all_urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)>\]"\"]+', readme_content)))
+    all_urls = list(dict.fromkeys(re.findall(r"https?://[^\s\)>\]\"'\,\.;]+", readme_content)))
 
     header = f"{repo_name} — Specification (generated from {readme_name})"
     sep = "=" * len(header)

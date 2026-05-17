@@ -113,14 +113,23 @@ def fork_repo(full_name: str, org: str) -> str:
     fork_name = f"{org}/{full_name.split('/')[-1]}"
     try:
         result = subprocess.run(
-            ["gh", "repo", "view", fork_name, "--json", "name"],
+            ["gh", "api", f"repos/{fork_name}"],
             capture_output=True,
             text=True,
             timeout=30,
         )
         if result.returncode == 0:
-            logger.info("  Fork already exists: %s", fork_name)
-            return fork_name
+            repo_data = json.loads(result.stdout)
+            parent = (repo_data.get("parent") or {}).get("full_name", "")
+            if parent.lower() == full_name.lower():
+                logger.info("  Fork already exists: %s", fork_name)
+                return fork_name
+            raise RuntimeError(
+                f"Fork name collision: {fork_name} already exists but its parent is "
+                f"{parent!r}, not {full_name!r}. Cannot fork into {org}."
+            )
+    except RuntimeError:
+        raise
     except Exception:
         pass
 
@@ -363,7 +372,7 @@ def resolve_commits_from_remote(fork_name: str, branch: str) -> tuple[str, str] 
         return None
 
 
-def build_setup_dict(repo_dir: Path, go_info: dict) -> dict:
+def build_setup_dict(repo_dir: Path, go_info: dict, full_name: str) -> dict:
     """Build the setup dict for a Go repo (mirrors Python's pip/packages setup)."""
     pre_install: list[str] = []
 
@@ -375,57 +384,27 @@ def build_setup_dict(repo_dir: Path, go_info: dict) -> dict:
             if line.strip() and not line.startswith("#")
         ]
 
-    module_path = go_info.get("module_path", "")
-    spec_url = _find_docs_url(repo_dir, module_path)
+    spec_url = _find_docs_url(go_info.get("module_path", ""))
 
     return {
         "install": "go mod download && go build ./...",
         "packages": "",
         "pip_packages": "",
         "pre_install": pre_install,
-        "go_version": go_info.get("go_version", "1.25"),
+        "go_version": go_info.get("go_version", "1.23"),
         "specification": spec_url,
     }
 
 
-def _find_docs_url(repo_dir: Path, module_path: str) -> str:
-    """Try to find documentation URL for a Go repo.
+def _find_docs_url(module_path: str) -> str:
+    """Construct the official pkg.go.dev documentation URL using the Go module path.
 
-    Priority:
-    1. README links to official docs site (godoc.org, pkg.go.dev, or custom docs)
-    2. pkg.go.dev page for the module
+    Uses the module path from go.mod (e.g. 'github.com/go-chi/chi/v5',
+    'go.uber.org/zap') to form the canonical pkg.go.dev URL. This correctly
+    handles vanity import paths and v2+ major-version suffixes. If scraping
+    it 404s, the caller falls back to generating a spec from the README.
     """
-    readme_names = ["README.md", "README.rst", "README.txt", "README", "readme.md"]
-    readme_content = ""
-    for name in readme_names:
-        readme_file = repo_dir / name
-        if readme_file.exists():
-            readme_content = readme_file.read_text(errors="replace")
-            break
-
-    if readme_content:
-        doc_patterns = [
-            r'https?://[^\s\)>\]"\']+\.(?:readthedocs|rtfd)\.io[^\s\)>\]"\']*',
-            r'https?://[^\s\)>\]"\']*docs?\.[^\s\)>\]"\']+',
-            r'https?://pkg\.go\.dev/[^\s\)>\]"\']+',
-            r'https?://godoc\.org/[^\s\)>\]"\']+',
-            r'https?://(?:github\.com|gitlab\.com)/[^\s\)>\]"\']*/wiki[^\s\)>\]"\"]*',
-        ]
-        for pattern in doc_patterns:
-            m = re.search(pattern, readme_content)
-            if m:
-                url = m.group(0).rstrip(".,;:!?)")
-                if not any(
-                    x in url.lower()
-                    for x in ["badge", "shields.io", "img.shields", "goreportcard"]
-                ):
-                    return url
-
-    if module_path:
-        return f"https://pkg.go.dev/{module_path}"
-
-    return ""
-
+    return f"https://pkg.go.dev/{module_path}"
 
 
 def _generate_readme_spec_pdf(
@@ -455,7 +434,7 @@ def _generate_readme_spec_pdf(
         return None
 
     # Collect all unique HTTP(S) URLs from README, order-preserved
-    all_urls = list(dict.fromkeys(re.findall(r'https?://[^\s\)>\]"\"]+', readme_content)))
+    all_urls = list(dict.fromkeys(re.findall(r"https?://[^\s\)>\]\"'\,\.;]+", readme_content)))
 
     # Build spec document: full README content followed by a links appendix
     header = f"{repo_name} — Specification (generated from {readme_name})"
@@ -580,7 +559,7 @@ def prepare_single_repo(
                         "  No remote branch found — using local commits only"
                     )
 
-        setup_dict = build_setup_dict(repo_dir, go_info)
+        setup_dict = build_setup_dict(repo_dir, go_info, full_name)
         test_dict = build_test_dict(repo_dir)
 
         spec_path = None
@@ -654,7 +633,7 @@ def prepare_single_repo(
 
         repo_name = full_name.split("/")[-1]
         entry = {
-            "instance_id": f"{repo_name}_go",
+            "instance_id": f"{full_name.replace('/', '_')}_go",
             "repo": forked_name,
             "original_repo": full_name,
             "base_commit": base_commit,

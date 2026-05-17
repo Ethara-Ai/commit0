@@ -21,6 +21,7 @@ import bz2
 import json
 import logging
 import os
+import hashlib
 import re
 import shutil
 from collections import deque
@@ -32,14 +33,14 @@ if TYPE_CHECKING:
     import fitz
     import requests as requests_lib
     from bs4 import BeautifulSoup
-    from PyPDF2 import PdfMerger
+    from PyPDF2 import PdfMerger, PdfReader
     from playwright.sync_api import Browser, Page
 
 try:
     import fitz  # type: ignore[no-redef]
     import requests as requests_lib  # type: ignore[no-redef]
     from bs4 import BeautifulSoup  # type: ignore[no-redef]
-    from PyPDF2 import PdfMerger  # type: ignore[no-redef]
+    from PyPDF2 import PdfMerger, PdfReader  # type: ignore[no-redef]
     from playwright.sync_api import sync_playwright  # type: ignore[no-redef]
 
     _MISSING_DEPS = False
@@ -181,9 +182,6 @@ def _is_cloudflare_challenge(html: str) -> bool:
 
 def _remove_blank_pages(pdf_path: str) -> None:
     document = fitz.open(pdf_path)
-    if document.page_count < 2:
-        document.close()
-        return
 
     output_document = fitz.open()
     removed_captcha = 0
@@ -302,9 +300,10 @@ def _generate_pdf(page: Any, url: str, output_dir: str) -> str:
             )
             return pdf_path
 
-        out_name = f"{urlparse(url).path.replace('/', '_').strip('_')}.pdf"
-        if out_name == ".pdf":
-            out_name = "base.pdf"
+        _url_hash = hashlib.md5(url.encode()).hexdigest()[:8]
+        out_name = f"{urlparse(url).path.replace('/', '_').strip('_')}_{_url_hash}.pdf"
+        if out_name == f"_{_url_hash}.pdf":
+            out_name = f"base_{_url_hash}.pdf"
         pdf_path = os.path.join(output_dir, out_name)
 
         page.pdf(
@@ -325,6 +324,7 @@ def _crawl_website(
     page = browser.new_page()
     visited: set[str] = set()
     to_visit = deque([base_url])
+    queued: set[str] = {base_url}
     sequence: list[str] = []
     pages_scraped = 0
 
@@ -365,9 +365,11 @@ def _crawl_website(
                 if (
                     full_url
                     and full_url not in visited
-                    and full_url.startswith(base_url)
+                    and full_url not in queued
+                    and (full_url == base_url or full_url.startswith(base_url.rstrip("/") + "/") or full_url.startswith(base_url.rstrip("/") + "@"))
                 ):
                     to_visit.append(full_url)
+                    queued.add(full_url)
 
             pdf = _generate_pdf(page, current_url, output_dir)
             if pdf:
@@ -382,11 +384,16 @@ def _crawl_website(
 
 def _merge_pdfs(docs: list[str], output_filename: str) -> None:
     merger = PdfMerger()
-    for pdf in docs:
-        if os.path.exists(pdf):
-            merger.append(pdf)
-    merger.write(output_filename)
-    merger.close()
+    try:
+        for pdf in docs:
+            if os.path.exists(pdf):
+                try:
+                    merger.append(pdf)
+                except Exception as e:
+                    logger.warning("  Skipping corrupt PDF %s: %s", pdf, e)
+        merger.write(output_filename)
+    finally:
+        merger.close()
 
 
 def _compress_bz2(input_path: str, output_path: str) -> None:
@@ -404,14 +411,14 @@ def scrape_spec(
     if _MISSING_DEPS:
         raise ImportError(_MISSING_DEP_MSG)
 
-    blocked = {"github.com", "github.io", "gitlab.com", "bitbucket.org", "pypi.org", "wikipedia.org"}
+    blocked = {"github.com", "github.io", "gitlab.com", "bitbucket.org", "pypi.org", "wikipedia.org", "raw.githubusercontent.com", "go.googlesource.com"}
     domain = urlparse(base_url).netloc.lower()
     if any(domain == b or domain.endswith("." + b) for b in blocked):
         logger.warning("  Blocked domain %s — skipping spec scrape for %s", domain, name)
         return None
 
     os.makedirs(output_dir, exist_ok=True)
-    pages_dir = os.path.join(output_dir, f"{name}_pages")
+    pages_dir = os.path.join(output_dir, f"{name}_{os.getpid()}_pages")
     final_pdf = os.path.join(output_dir, f"{name}.pdf")
 
     url_parts = [x for x in base_url.split("/") if x]
@@ -443,6 +450,16 @@ def scrape_spec(
                     shutil.rmtree(pages_dir, ignore_errors=True)
 
     if not os.path.exists(final_pdf):
+        return None
+    try:
+        _rdr = PdfReader(final_pdf)
+        if len(_rdr.pages) == 0:
+            os.remove(final_pdf)
+            logger.warning("  All pages filtered out — no valid content for %s", name)
+            return None
+    except Exception as _pdf_e:
+        logger.warning("  Cannot validate merged PDF for %s: %s", name, _pdf_e)
+        os.remove(final_pdf)
         return None
 
     if compress:
