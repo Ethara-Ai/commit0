@@ -321,22 +321,64 @@ def push_to_fork(repo_dir: Path, fork_name: str, branch: str = REMOTE_BRANCH) ->
 # ─── Dataset Entry ────────────────────────────────────────────────────────────
 
 
+def _detect_java_version(repo_dir: Path) -> str:
+    pom = repo_dir / "pom.xml"
+    if pom.exists():
+        try:
+            import re
+            content = pom.read_text()
+            content_no_ns = re.sub(r'\sxmlns="[^"]+"', "", content, count=1)
+            import xml.etree.ElementTree as ET
+            root = ET.fromstring(content_no_ns)
+            for xpath in [
+                ".//maven.compiler.release",
+                ".//maven.compiler.target",
+                ".//java.version",
+                "./properties/maven.compiler.release",
+                "./properties/maven.compiler.target",
+            ]:
+                el = root.find(xpath)
+                if el is not None and el.text:
+                    v = el.text.strip().lstrip("1.")
+                    if v.isdigit():
+                        return v
+        except Exception:
+            pass
+    for gradle in [repo_dir / "build.gradle", repo_dir / "build.gradle.kts"]:
+        if gradle.exists():
+            try:
+                import re
+                m = re.search(
+                    r"sourceCompatibility\s*=\s*['\"]?(?:JavaVersion\.VERSION_)?(\d+)",
+                    gradle.read_text(),
+                )
+                if m:
+                    return m.group(1)
+            except Exception:
+                continue
+    return "17"
+
+
 def create_dataset_entry(
     full_name: str,
     fork_name: str,
     base_commit: str,
     reference_commit: str,
     entry: dict,
+    repo_dir: Path | None = None,
 ) -> dict:
     """Create a dataset entry with repo pointing to the fork."""
     repo_short = full_name.split("/")[-1]
+    setup = dict(entry.get("setup") or {})
+    if repo_dir is not None and "java_version" not in setup:
+        setup["java_version"] = _detect_java_version(repo_dir)
     return {
         "instance_id": f"commit-0/{repo_short}",
         "repo": fork_name,
         "original_repo": full_name,
         "base_commit": base_commit,
         "reference_commit": reference_commit,
-        "setup": entry.get("setup", {}),
+        "setup": setup,
         "test": entry.get("test", {}),
         "src_dir": entry.get("src_dir", "src/main/java"),
     }
@@ -438,6 +480,7 @@ def prepare_java_repos(
             base_commit=base_commit,
             reference_commit=reference_commit,
             entry=entry,
+            repo_dir=repo_dir,
         )
         logger.info("  Entry: repo=%s, base=%s", fork_name, base_commit[:12])
         dataset_entries.append(dataset_entry)

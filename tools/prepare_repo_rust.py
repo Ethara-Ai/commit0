@@ -568,29 +568,98 @@ def prepare_rust_repo(
     return entry
 
 
+def _fetch_cargo_toml(upstream: str, sub_path: str = "") -> str | None:
+    import urllib.request
+    suffix = f"/{sub_path.strip('/')}" if sub_path else ""
+    for branch in ("main", "master"):
+        url = f"https://raw.githubusercontent.com/{upstream}{suffix}/{branch}/Cargo.toml" if sub_path else f"https://raw.githubusercontent.com/{upstream}/{branch}/Cargo.toml"
+        try:
+            req = urllib.request.Request(url, headers={"User-Agent": "kaiju-prepare"})
+            with urllib.request.urlopen(req, timeout=15) as r:
+                if r.status == 200:
+                    return r.read().decode("utf-8")
+        except Exception:
+            continue
+    return None
+
+
+def _derive_rust_defaults(upstream: str) -> dict:
+    short = upstream.split("/")[-1]
+    fallback = {"crate": short, "src_dir": "src", "test_cmd": "cargo test"}
+    raw = _fetch_cargo_toml(upstream)
+    if not raw:
+        return fallback
+    try:
+        try:
+            import tomllib
+        except ImportError:
+            import tomli as tomllib  # type: ignore
+        data = tomllib.loads(raw)
+    except Exception:
+        return fallback
+
+    if "package" in data and "name" in data["package"]:
+        return {
+            "crate": data["package"]["name"],
+            "src_dir": "src",
+            "test_cmd": "cargo test",
+        }
+
+    if "workspace" in data:
+        members = data["workspace"].get("members") or []
+        for member in members:
+            if "*" in member:
+                continue
+            sub_raw = _fetch_cargo_toml(upstream, sub_path=member)
+            if not sub_raw:
+                continue
+            try:
+                sub_data = tomllib.loads(sub_raw)
+            except Exception:
+                continue
+            if "package" in sub_data and "name" in sub_data["package"]:
+                crate = sub_data["package"]["name"]
+                return {
+                    "crate": crate,
+                    "src_dir": f"{member.rstrip('/')}/src",
+                    "test_cmd": f"cargo test -p {crate}",
+                }
+    return fallback
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Prepare a Rust repo for commit0 dataset"
     )
     parser.add_argument(
         "--upstream",
-        required=True,
-        help="Upstream repo (e.g. open-telemetry/opentelemetry-rust)",
+        default=None,
+        help="Upstream repo (e.g. open-telemetry/opentelemetry-rust). Falls back to --repo.",
+    )
+    parser.add_argument(
+        "--repo",
+        default=None,
+        help="Alias for --upstream (used by the EKS Argo dispatcher).",
+    )
+    parser.add_argument(
+        "--output",
+        default=None,
+        help="Path to write generated dataset entries as JSON array.",
     )
     parser.add_argument(
         "--crate",
-        required=True,
-        help="Crate name to stub (e.g. opentelemetry-http)",
+        default=None,
+        help="Crate name to stub. Auto-detected from Cargo.toml if omitted.",
     )
     parser.add_argument(
         "--src-dir",
-        required=True,
-        help="Relative path to source dir (e.g. opentelemetry-http/src)",
+        default=None,
+        help="Source dir relative to repo root. Defaults to 'src' (or '<member>/src' for workspaces).",
     )
     parser.add_argument(
         "--test-cmd",
-        required=True,
-        help='Test command (e.g. "cargo test -p opentelemetry-http")',
+        default=None,
+        help="Test command. Defaults to 'cargo test' (or 'cargo test -p <crate>' for workspaces).",
     )
     parser.add_argument(
         "--org",
@@ -636,6 +705,24 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    if args.upstream is None:
+        args.upstream = args.repo
+    if not args.upstream:
+        parser.error("either --upstream or --repo is required")
+
+    if not all([args.crate, args.src_dir, args.test_cmd]):
+        derived = _derive_rust_defaults(args.upstream)
+        if not args.crate:
+            args.crate = derived["crate"]
+        if not args.src_dir:
+            args.src_dir = derived["src_dir"]
+        if not args.test_cmd:
+            args.test_cmd = derived["test_cmd"]
+        logger.info(
+            "Resolved Rust args — crate=%s src_dir=%s test_cmd=%r",
+            args.crate, args.src_dir, args.test_cmd,
+        )
+
     if not RUSTSTUBBER.exists():
         logger.error(
             "ruststubber binary not found at %s\n"
@@ -661,6 +748,12 @@ def main() -> None:
 
     if entry is None:
         sys.exit(1)
+
+    if args.output:
+        out_path = Path(args.output)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps([entry], indent=2))
+        logger.info("Wrote dataset entry to %s", out_path)
 
 
 if __name__ == "__main__":

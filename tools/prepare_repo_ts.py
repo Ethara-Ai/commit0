@@ -205,13 +205,37 @@ def detect_ts_src_dir(repo_dir: Path) -> str:
     if root_ts:
         return "."
 
-    # 4. First directory with index.ts (packages/*/src pattern)
+    # 4. First direct child with index.ts
     for child in sorted(repo_dir.iterdir()):
         if not child.is_dir():
             continue
         if child.name.startswith(".") or child.name == "node_modules":
             continue
         if (child / "index.ts").exists():
+            return child.name
+
+    for workspace_root in ("packages", "apps", "source", "modules"):
+        ws_dir = repo_dir / workspace_root
+        if ws_dir.is_dir():
+            ts_files = [
+                f for f in ws_dir.rglob("*.ts")
+                if not f.name.endswith(".d.ts")
+                and "node_modules" not in f.parts
+                and "dist" not in f.parts
+            ]
+            if ts_files:
+                return workspace_root
+
+    for child in sorted(repo_dir.iterdir()):
+        if not child.is_dir():
+            continue
+        if child.name.startswith(".") or child.name in {"node_modules", "dist", "build", "coverage"}:
+            continue
+        ts_files = [
+            f for f in child.rglob("*.ts")
+            if not f.name.endswith(".d.ts") and "node_modules" not in f.parts
+        ]
+        if ts_files:
             return child.name
 
     return ""
@@ -724,7 +748,7 @@ def create_ts_stubbed_branch(
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=600,
             check=False,
         )
 
@@ -833,14 +857,14 @@ def _run_post_stub_tsc_check(repo_dir: Path) -> None:
             cwd=str(repo_dir),
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=600,
             check=False,
         )
     except FileNotFoundError:
         logger.warning("  Skipping tsc check: npx not available")
         return
     except subprocess.TimeoutExpired:
-        logger.warning("  tsc --noEmit timed out after 180s (non-fatal)")
+        logger.warning("  tsc --noEmit timed out after 600s (non-fatal)")
         return
 
     if result.returncode == 0:

@@ -53,9 +53,25 @@ def run_stub_ts(
     if not stub_ts_path.exists():
         raise FileNotFoundError(f"TypeScript stubber not found: {stub_ts_path}")
 
+    ts_node_flags: list[str] = []
+    probe = Path(src_dir).resolve()
+    for _ in range(8):
+        pkg = probe / "package.json"
+        if pkg.exists():
+            try:
+                if json.loads(pkg.read_text()).get("type") == "module":
+                    ts_node_flags.append("--esm")
+            except Exception:
+                pass
+            break
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+
     cmd = [
         "npx",
         "ts-node",
+        *ts_node_flags,
         str(stub_ts_path),
         "--src-dir",
         str(src_dir),
