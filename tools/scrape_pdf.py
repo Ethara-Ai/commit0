@@ -411,7 +411,7 @@ def scrape_spec(
     if _MISSING_DEPS:
         raise ImportError(_MISSING_DEP_MSG)
 
-    blocked = {"github.com", "github.io", "gitlab.com", "bitbucket.org", "pypi.org", "wikipedia.org", "raw.githubusercontent.com", "go.googlesource.com"}
+    blocked = {"github.com", "gitlab.com", "bitbucket.org", "pypi.org", "wikipedia.org", "raw.githubusercontent.com", "go.googlesource.com"}
     domain = urlparse(base_url).netloc.lower()
     if any(domain == b or domain.endswith("." + b) for b in blocked):
         logger.warning("  Blocked domain %s — skipping spec scrape for %s", domain, name)
@@ -475,6 +475,171 @@ def scrape_spec(
 
 # Alias for backward compatibility (was async, now sync)
 scrape_spec_sync = scrape_spec
+
+
+_README_NOISE_DOMAINS: frozenset[str] = frozenset([
+    "shields.io", "img.shields.io", "badge.fury.io",
+    "travis-ci.org", "travis-ci.com", "app.travis-ci.com", "circleci.com",
+    "codecov.io", "coveralls.io", "goreportcard.com", "snyk.io",
+    "pkg-size.dev", "hits.sh", "buymeacoffee.com", "ko-fi.com",
+    "patreon.com", "twitter.com", "x.com", "linkedin.com",
+    "discord.gg", "discord.com", "slack.com", "t.me",
+])
+
+_DOC_HINTS: tuple[str, ...] = (
+    "docs.", "/docs", "documentation", "api.", "/api",
+    "readthedocs", "godoc", "pkg.go.dev", "docs.rs",
+    "/doc", "manual", "guide", "reference", "javadoc", "rustdoc",
+    "github.io",
+)
+
+
+def _score_doc_url(url: str, identity_tokens: frozenset[str] = frozenset()) -> int:
+    lower = url.lower()
+    score = sum(5 for hint in _DOC_HINTS if hint in lower)
+    # Strongly prefer the project's OWN docs over a dependency's docs that the
+    # README also links to (e.g. memo's README links joblib.readthedocs.io).
+    if identity_tokens and any(tok in lower for tok in identity_tokens):
+        score += 100
+    return score
+
+
+def _render_readme_text_pdf(
+    readme_content: str,
+    readme_name: str,
+    repo_name: str,
+    specs_dir: str | Path,
+) -> str | None:
+    """Render README text + extracted links to a bz2-compressed PDF. Returns path or None."""
+    try:
+        import fitz as _fitz
+    except ImportError:
+        logger.warning("  README text fallback requires PyMuPDF: pip install PyMuPDF")
+        return None
+    import bz2 as _bz2
+
+    _raw_urls = re.findall(r"https?://[^\s<>\"'\)\]]+", readme_content)
+    all_urls = list(dict.fromkeys(u.rstrip(".,;:!?") for u in _raw_urls))
+    header = f"{repo_name} \u2014 Specification (generated from {readme_name})"
+    sep = "=" * len(header)
+    doc_lines: list[str] = [header, sep, "", readme_content.strip()]
+    if all_urls:
+        doc_lines += ["", sep, "Referenced Links", sep, ""]
+        doc_lines.extend(f"  {u}" for u in all_urls)
+    full_text = "\n".join(doc_lines)
+
+    page_w, page_h = 595, 842
+    margin = 40
+    font_size = 9
+    line_h = font_size * 1.35
+    max_chars = int((page_w - 2 * margin) / (font_size * 0.52))
+
+    def _wrap(line: str) -> list[str]:
+        if len(line) <= max_chars:
+            return [line]
+        wrapped: list[str] = []
+        while len(line) > max_chars:
+            cut = line.rfind(" ", 0, max_chars)
+            if cut < max_chars // 2:
+                cut = max_chars
+            wrapped.append(line[:cut])
+            line = line[cut:].lstrip()
+        if line:
+            wrapped.append(line)
+        return wrapped
+
+    fitz_doc = _fitz.open()
+    try:
+        def _new_page():
+            p = fitz_doc.new_page(width=page_w, height=page_h)
+            return p, margin + font_size
+
+        cur_page, y = _new_page()
+        for raw_line in full_text.split("\n"):
+            for sub in _wrap(raw_line):
+                if y + line_h > page_h - margin:
+                    cur_page, y = _new_page()
+                if sub.strip():
+                    cur_page.insert_text((margin, y), sub, fontsize=font_size, color=(0, 0, 0))
+                y += line_h
+
+        pdf_bytes = fitz_doc.tobytes()
+    finally:
+        fitz_doc.close()
+    specs_path = Path(specs_dir)
+    specs_path.mkdir(parents=True, exist_ok=True)
+    out_path = specs_path / f"{repo_name}_readme_spec.pdf.bz2"
+    with _bz2.open(out_path, "wb") as fh:
+        fh.write(pdf_bytes)
+    logger.info("  README text spec written: %s", out_path)
+    return str(out_path)
+
+
+def scrape_readme_spec(
+    repo_dir: str | Path,
+    specs_dir: str | Path = "specs",
+    repo_name: str = "",
+    compress: bool = True,
+) -> tuple[str | None, str]:
+    """Generate a spec PDF for a repo by crawling README links via Playwright.
+
+    Strategy:
+      1. Find repo README and extract all HTTP(S) links.
+      2. Remove badge/noise domains; score by documentation relevance.
+      3. Try scrape_spec() (Playwright BFS crawl) on the top 3 candidates.
+      4. Fall back to plain-text PDF rendering of the README itself.
+
+    Returns:
+        (spec_path, crawled_url) -- crawled_url is empty string for the text fallback.
+    """
+    repo_dir = Path(repo_dir)
+    if not repo_name:
+        repo_name = repo_dir.name
+    _readme_names = ["README.md", "README.rst", "README.txt", "README", "readme.md"]
+    readme_content = ""
+    readme_name = "README"
+    for _n in _readme_names:
+        _candidate = repo_dir / _n
+        if _candidate.exists():
+            readme_content = _candidate.read_text(errors="replace")
+            readme_name = _n
+            break
+    if not readme_content.strip():
+        logger.info("  No README for %s \u2014 skipping README spec fallback", repo_name)
+        return None, ""
+    _raw_urls = re.findall(r"https?://[^\s<>\"'\)\]]+", readme_content)
+    all_urls = list(dict.fromkeys(u.rstrip(".,;:!?") for u in _raw_urls))
+    _blocked_all = {
+        "github.com", "gitlab.com", "bitbucket.org", "pypi.org",
+        "wikipedia.org", "raw.githubusercontent.com", "go.googlesource.com",
+    } | _README_NOISE_DOMAINS
+    candidate_urls = [
+        u for u in all_urls
+        if not any(
+            urlparse(u).netloc.lower() == b or urlparse(u).netloc.lower().endswith("." + b)
+            for b in _blocked_all
+        )
+    ]
+    _identity_tokens = frozenset(
+        t for t in re.split(r"[^a-z0-9]+", f"{repo_dir.name} {repo_name}".lower())
+        if len(t) >= 3
+    )
+    candidate_urls.sort(
+        key=lambda u: _score_doc_url(u, _identity_tokens), reverse=True
+    )
+    if not _MISSING_DEPS:
+        for url in candidate_urls[:3]:
+            try:
+                logger.info("  Trying README link via Playwright: %s", url)
+                path = scrape_spec(url, repo_name, output_dir=str(specs_dir), compress=compress)
+                if path:
+                    logger.info("  README Playwright spec scraped: %s (from %s)", path, url)
+                    return path, url
+            except Exception as exc:
+                logger.debug("  README link Playwright failed for %s: %s", url, exc)
+    logger.info("  Falling back to README text rendering for %s", repo_name)
+    text_path = _render_readme_text_pdf(readme_content, readme_name, repo_name, specs_dir)
+    return text_path, ""
 
 
 def main() -> None:
