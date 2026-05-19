@@ -775,6 +775,104 @@ def _render_readme_html_pdf(
             os.unlink(tmp_path)
 
 
+def _github_slug_from_repo(repo_dir: Path) -> str:
+    """Extract 'org/repo' from a local clone's git remotes. Returns '' if unavailable."""
+    import subprocess
+    for remote in ("origin", "upstream", "fork"):
+        try:
+            res = subprocess.run(
+                ["git", "-C", str(repo_dir), "config", "--get", f"remote.{remote}.url"],
+                capture_output=True, text=True, timeout=10,
+            )
+        except Exception:
+            continue
+        url = (res.stdout or "").strip()
+        if not url:
+            continue
+        m = re.search(r'github\.com[:/]+([^/\s]+/[^/\s]+?)(?:\.git)?/?$', url)
+        if m:
+            return m.group(1)
+    return ""
+
+
+def _render_github_readme_pdf(
+    slug: str,
+    repo_name: str,
+    specs_dir: str | Path,
+) -> str | None:
+    """Render a repo's README straight from its GitHub page to a bz2-compressed PDF.
+
+    GitHub natively renders Markdown, reStructuredText, and embedded raw HTML, so this
+    produces a faithful, fully-styled spec regardless of README format.
+    """
+    if _MISSING_DEPS or not slug:
+        return None
+    import bz2 as _bz2
+    import tempfile
+
+    url = f"https://github.com/{slug}"
+    specs_path = Path(specs_dir)
+    specs_path.mkdir(parents=True, exist_ok=True)
+    out_path = specs_path / f"{repo_name}_readme_spec.pdf.bz2"
+    isolate_js = """() => {
+        const art = document.querySelector('article.markdown-body')
+            || document.querySelector('#readme article')
+            || document.querySelector('[data-testid=readme]');
+        if (!art) return false;
+        const clone = art.cloneNode(true);
+        clone.querySelectorAll('img').forEach(i => {
+            i.loading = 'eager';
+            const s = i.getAttribute('src');
+            if (s) { i.setAttribute('src', ''); i.setAttribute('src', s); }
+        });
+        document.body.innerHTML = '';
+        document.body.style.cssText = 'margin:0;padding:36px 44px;background:#ffffff;';
+        clone.style.maxWidth = '100%';
+        document.body.appendChild(clone);
+        return true;
+    }"""
+    tmp_path = ""
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[no-redef]
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                pg = browser.new_page(viewport={"width": 1024, "height": 1400})
+                pg.emulate_media(color_scheme="light")
+                resp = pg.goto(url, wait_until="domcontentloaded", timeout=45000)
+                if not resp or resp.status >= 400:
+                    logger.debug("  GitHub page HTTP %s for %s", resp.status if resp else "?", url)
+                    return None
+                pg.wait_for_selector(
+                    "article.markdown-body, [data-testid=readme]", timeout=20000
+                )
+                if not pg.evaluate(isolate_js):
+                    logger.debug("  Could not isolate README article on %s", url)
+                    return None
+                pg.wait_for_timeout(1800)
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp_path = tmp.name
+                pg.pdf(
+                    path=tmp_path,
+                    print_background=True,
+                    format="A4",
+                    margin={"top": "0px", "bottom": "0px", "left": "0px", "right": "0px"},
+                )
+                pg.close()
+            finally:
+                browser.close()
+        with open(tmp_path, "rb") as f_in, _bz2.open(out_path, "wb") as f_out:
+            f_out.writelines(f_in)
+        logger.info("  GitHub README spec rendered: %s (from %s)", out_path, url)
+        return str(out_path)
+    except Exception as exc:
+        logger.warning("  GitHub README render failed (%s)", exc)
+        return None
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 def scrape_readme_spec(
     repo_dir: str | Path,
     specs_dir: str | Path = "specs",
@@ -837,9 +935,15 @@ def scrape_readme_spec(
                     return path, url
             except Exception as exc:
                 logger.debug("  README link Playwright failed for %s: %s", url, exc)
-    logger.info("  Falling back to README styled HTML spec for %s", repo_name)
-    text_path = _render_readme_html_pdf(readme_content, readme_name, repo_name, specs_dir)
-    return text_path, ""
+    logger.info("  Falling back to README rendering for %s", repo_name)
+    _slug = _github_slug_from_repo(repo_dir)
+    if _slug:
+        logger.info("  Rendering README from GitHub page: %s", _slug)
+        gh_path = _render_github_readme_pdf(_slug, repo_name, specs_dir)
+        if gh_path:
+            return gh_path, f"https://github.com/{_slug}"
+    spec_path = _render_readme_html_pdf(readme_content, readme_name, repo_name, specs_dir)
+    return spec_path, ""
 
 
 def main() -> None:
