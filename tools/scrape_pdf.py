@@ -575,6 +575,206 @@ def _render_readme_text_pdf(
     return str(out_path)
 
 
+def _md_to_html(md: str) -> str:
+    """Lightweight markdown-to-HTML for README rendering (no external deps)."""
+    import html as _html
+
+    def _inline(text: str) -> str:
+        text = _html.escape(text)
+        text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+        text = re.sub(r'\*\*\*([^*]+)\*\*\*', r'<strong><em>\1</em></strong>', text)
+        text = re.sub(r'\*\*([^*]+)\*\*', r'<strong>\1</strong>', text)
+        text = re.sub(r'\*([^*\n]+)\*', r'<em>\1</em>', text)
+        text = re.sub(r'\[([^\]]+)\]\(([^)]+)\)', r'<a href="\2">\1</a>', text)
+        return text
+
+    parts: list[str] = []
+    in_code = False
+    code_lang = ""
+    code_buf: list[str] = []
+    in_list = ""
+
+    def _flush_list() -> None:
+        nonlocal in_list
+        if in_list:
+            parts.append(f"</{in_list}>")
+            in_list = ""
+
+    for line in md.splitlines():
+        if line.startswith("```"):
+            if in_code:
+                escaped = _html.escape("\n".join(code_buf))
+                parts.append(f'<pre><code class="language-{code_lang}">{escaped}</code></pre>')
+                code_buf = []
+                code_lang = ""
+                in_code = False
+            else:
+                _flush_list()
+                in_code = True
+                code_lang = line[3:].strip()
+            continue
+        if in_code:
+            code_buf.append(line)
+            continue
+        m = re.match(r'^(#{1,6})\s+(.*)', line)
+        if m:
+            _flush_list()
+            lvl = len(m.group(1))
+            parts.append(f'<h{lvl}>{_inline(m.group(2))}</h{lvl}>')
+            continue
+        if re.match(r'^[-*_]{3,}\s*$', line):
+            _flush_list()
+            parts.append('<hr>')
+            continue
+        m = re.match(r'^>\s?(.*)', line)
+        if m:
+            _flush_list()
+            parts.append(f'<blockquote><p>{_inline(m.group(1))}</p></blockquote>')
+            continue
+        m = re.match(r'^[-*+]\s+(.*)', line)
+        if m:
+            if in_list != 'ul':
+                _flush_list()
+                parts.append('<ul>')
+                in_list = 'ul'
+            parts.append(f'<li>{_inline(m.group(1))}</li>')
+            continue
+        m = re.match(r'^\d+\.\s+(.*)', line)
+        if m:
+            if in_list != 'ol':
+                _flush_list()
+                parts.append('<ol>')
+                in_list = 'ol'
+            parts.append(f'<li>{_inline(m.group(1))}</li>')
+            continue
+        if not line.strip():
+            _flush_list()
+            parts.append('')
+            continue
+        _flush_list()
+        parts.append(f'<p>{_inline(line)}</p>')
+
+    if in_code and code_buf:
+        parts.append(f'<pre><code>{_html.escape(chr(10).join(code_buf))}</code></pre>')
+    _flush_list()
+    return '\n'.join(parts)
+
+
+def _render_readme_html_pdf(
+    readme_content: str,
+    readme_name: str,
+    repo_name: str,
+    specs_dir: str | Path,
+) -> str | None:
+    """Render README as styled HTML via Playwright → bz2-compressed PDF."""
+    if _MISSING_DEPS:
+        return _render_readme_text_pdf(readme_content, readme_name, repo_name, specs_dir)
+
+    import bz2 as _bz2
+    import tempfile
+
+    body_html = _md_to_html(readme_content)
+    safe_repo = re.sub(r'[<>&"\']', '', repo_name)
+    safe_readme = re.sub(r'[<>&"\']', '', readme_name)
+
+    html = f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+<meta charset=\"UTF-8\">
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    font-size: 13px; line-height: 1.65; color: #24292e; background: #ffffff;
+  }}
+  .page-header {{
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    padding: 28px 48px 24px;
+  }}
+  .page-header h1 {{ font-size: 22px; font-weight: 700; color: #e8f4fd; border: none; padding: 0; margin: 0; }}
+  .page-header .sub {{ font-size: 11px; color: #8ab4d4; margin-top: 6px; }}
+  .content {{ padding: 32px 48px 48px; max-width: 860px; }}
+  h1 {{ font-size: 20px; color: #0f3460; border-bottom: 2px solid #dde4ed; padding-bottom: 8px; margin: 28px 0 14px; }}
+  h2 {{ font-size: 17px; color: #1a5276; border-bottom: 1px solid #dde4ed; padding-bottom: 6px; margin: 22px 0 10px; }}
+  h3 {{ font-size: 14px; color: #1f618d; margin: 18px 0 8px; font-weight: 600; }}
+  h4, h5, h6 {{ font-size: 13px; color: #2874a6; margin: 14px 0 6px; font-weight: 600; }}
+  p {{ margin: 6px 0 10px; }}
+  a {{ color: #0366d6; text-decoration: none; }}
+  code {{
+    background: #f0f4f8; border: 1px solid #d1d9e0; border-radius: 3px;
+    padding: 1px 5px;
+    font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', monospace;
+    font-size: 11.5px; color: #d63384;
+  }}
+  pre {{
+    background: #1e2a38; border-radius: 6px; padding: 16px 20px; margin: 14px 0;
+    border-left: 4px solid #0366d6; page-break-inside: avoid;
+  }}
+  pre code {{ background: none; border: none; padding: 0; color: #cdd9e5; font-size: 11px; white-space: pre-wrap; word-break: break-all; }}
+  ul, ol {{ padding-left: 24px; margin: 8px 0 10px; }}
+  li {{ margin: 3px 0; }}
+  blockquote {{
+    border-left: 4px solid #0366d6; background: #f0f7ff;
+    margin: 12px 0; padding: 10px 16px; color: #586069; border-radius: 0 4px 4px 0;
+  }}
+  blockquote p {{ margin: 0; }}
+  hr {{ border: none; border-top: 1px solid #dde4ed; margin: 22px 0; }}
+  strong {{ color: #24292e; font-weight: 600; }}
+  em {{ color: #586069; }}
+  .page-footer {{
+    background: #f6f8fa; border-top: 1px solid #dde4ed;
+    padding: 12px 48px; font-size: 10px; color: #6a737d; margin-top: 12px;
+  }}
+</style>
+</head>
+<body>
+<div class=\"page-header\">
+  <h1>{safe_repo} &mdash; Specification</h1>
+  <div class=\"sub\">Generated from {safe_readme} &middot; Kaiju Commit-0 Dataset</div>
+</div>
+<div class=\"content\">
+{body_html}
+</div>
+<div class=\"page-footer\">
+  Kaiju prepare_repo pipeline &middot; Source: {safe_readme} &middot; {safe_repo}
+</div>
+</body>
+</html>"""
+
+    specs_path = Path(specs_dir)
+    specs_path.mkdir(parents=True, exist_ok=True)
+    out_path = specs_path / f"{repo_name}_readme_spec.pdf.bz2"
+    tmp_path = ""
+    try:
+        from playwright.sync_api import sync_playwright  # type: ignore[no-redef]
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            try:
+                pg = browser.new_page()
+                pg.set_content(html, wait_until="domcontentloaded")
+                with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+                    tmp_path = tmp.name
+                pg.pdf(
+                    path=tmp_path,
+                    print_background=True,
+                    format="A4",
+                    margin={"top": "0px", "bottom": "0px", "left": "0px", "right": "0px"},
+                )
+                pg.close()
+            finally:
+                browser.close()
+        with open(tmp_path, "rb") as f_in, _bz2.open(out_path, "wb") as f_out:
+            f_out.writelines(f_in)
+        logger.info("  README HTML spec written: %s", out_path)
+        return str(out_path)
+    except Exception as exc:
+        logger.warning("  Playwright HTML render failed (%s), falling back to text PDF", exc)
+        return _render_readme_text_pdf(readme_content, readme_name, repo_name, specs_dir)
+    finally:
+        if tmp_path and os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+
 def scrape_readme_spec(
     repo_dir: str | Path,
     specs_dir: str | Path = "specs",
@@ -637,8 +837,8 @@ def scrape_readme_spec(
                     return path, url
             except Exception as exc:
                 logger.debug("  README link Playwright failed for %s: %s", url, exc)
-    logger.info("  Falling back to README text rendering for %s", repo_name)
-    text_path = _render_readme_text_pdf(readme_content, readme_name, repo_name, specs_dir)
+    logger.info("  Falling back to README styled HTML spec for %s", repo_name)
+    text_path = _render_readme_html_pdf(readme_content, readme_name, repo_name, specs_dir)
     return text_path, ""
 
 
