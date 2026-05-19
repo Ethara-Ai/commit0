@@ -2,7 +2,7 @@
 Prepare Rust repos for a commit0 dataset.
 
 For each repo:
-1. Fork to Rust-commit0 GitHub org
+1. Fork to Zahgon GitHub org
 2. Clone locally, record reference_commit (HEAD)
 3. Create 'commit0_all' branch
 4. Run ruststubber on source files
@@ -16,14 +16,14 @@ For each repo:
 
 Usage:
     python3 -m tools.prepare_repo_rust \
-        --upstream open-telemetry/opentelemetry-rust \
+        --repo open-telemetry/opentelemetry-rust \
         --crate opentelemetry-http \
         --src-dir opentelemetry-http/src \
         --test-cmd "cargo test -p opentelemetry-http"
 
     # Dry run (no fork, no push):
     python3 -m tools.prepare_repo_rust \
-        --upstream serde-rs/serde \
+        --repo serde-rs/serde \
         --crate serde \
         --src-dir serde/src \
         --test-cmd "cargo test -p serde" \
@@ -55,11 +55,10 @@ logger = logging.getLogger(__name__)
 TOOLS_DIR = Path(__file__).parent
 PROJECT_ROOT = TOOLS_DIR.parent
 RUSTSTUBBER = TOOLS_DIR / "ruststubber" / "target" / "release" / "ruststubber"
-CONSTANTS_RUST_FILE = PROJECT_ROOT / "commit0" / "harness" / "constants_rust.py"
-SPECS_DIR = PROJECT_ROOT / "specs_rust"
+SPECS_DIR = PROJECT_ROOT / "specs"
 
 # GitHub org to fork repos into
-DEFAULT_ORG = "Rust-commit0"
+DEFAULT_ORG = "Zahgon"
 
 
 # ─── Git Helpers ──────────────────────────────────────────────────────────────
@@ -356,37 +355,6 @@ def append_to_dataset(entry: dict, repo_name: str) -> Path:
     return dataset_file
 
 
-def update_rust_split(fork_name: str) -> None:
-    """Add fork_name to RUST_SPLIT['all'] in constants_rust.py if not present."""
-    if not CONSTANTS_RUST_FILE.exists():
-        logger.warning("constants_rust.py not found at %s, skipping RUST_SPLIT update", CONSTANTS_RUST_FILE)
-        return
-
-    content = CONSTANTS_RUST_FILE.read_text()
-
-    if f'"{fork_name}"' in content:
-        logger.info("RUST_SPLIT already contains %s", fork_name)
-        return
-
-    # Regex: capture RUST_SPLIT's "all" list contents to append a new entry before closing ]
-    pattern = r'(RUST_SPLIT:\s*Dict\[str,\s*list\[str\]\]\s*=\s*\{[^}]*"all":\s*\[)(.*?)(\s*\],)'
-    match = re.search(pattern, content, re.DOTALL)
-    if not match:
-        logger.warning("Could not parse RUST_SPLIT in constants_rust.py, skipping update")
-        return
-
-    before = match.group(1)
-    existing_entries = match.group(2)
-    after = match.group(3)
-
-    # Build new entry line with proper indentation
-    new_entry = f'\n        "{fork_name}",'
-    new_content = content[:match.start()] + before + existing_entries + new_entry + after + content[match.end():]
-
-    CONSTANTS_RUST_FILE.write_text(new_content)
-    logger.info("Added %s to RUST_SPLIT in %s", fork_name, CONSTANTS_RUST_FILE)
-
-
 # ─── Per-Repo YAML Config ───────────────────────────────────────────────────
 
 
@@ -430,6 +398,7 @@ def prepare_rust_repo(
     packages: str = "pkg-config libssl-dev",
     skip_compile_check: bool = False,
     skip_spec: bool = False,
+    specs_dir: Path = SPECS_DIR,
 ) -> dict | None:
     """
     Run the full preparation pipeline for a single Rust repo/crate.
@@ -439,7 +408,7 @@ def prepare_rust_repo(
     repo_name = upstream.split("/")[-1]
 
     if clone_dir is None:
-        clone_dir = Path("repos")
+        clone_dir = Path("repos_staging")
 
     logger.info("=" * 60)
     logger.info("Preparing: %s (crate: %s)", upstream, crate)
@@ -496,15 +465,15 @@ def prepare_rust_repo(
             git(repo_dir, "add", spec_filename)
             git(repo_dir, "commit", "-m", f"Add {crate} API spec (docs.rs PDF)")
             # Save a local copy to specs_rust/
-            SPECS_DIR.mkdir(parents=True, exist_ok=True)
-            local_spec = SPECS_DIR / spec_filename
+            specs_dir.mkdir(parents=True, exist_ok=True)
+            local_spec = specs_dir / spec_filename
             shutil.copy2(str(spec_path), str(local_spec))
             logger.info("Local spec copy: %s", local_spec)
         else:
             if not dry_run:
                 try:
                     from tools.scrape_pdf import scrape_readme_spec as _scrape_readme_spec
-                    readme_spec_path, readme_spec_url = _scrape_readme_spec(repo_dir, SPECS_DIR, crate)
+                    readme_spec_path, readme_spec_url = _scrape_readme_spec(repo_dir, specs_dir, crate)
                 except ImportError:
                     readme_spec_path = None
                 if readme_spec_path:
@@ -542,12 +511,11 @@ def prepare_rust_repo(
         rust_version=rust_version,
         edition=edition,
         packages=packages,
-        specification=readme_spec_url or spec_filename,
+        specification=readme_spec_url or f"https://docs.rs/{crate}",
     )
 
     if not dry_run:
         append_to_dataset(entry, repo_name)
-        update_rust_split(fork_name)
     else:
         logger.info("[DRY RUN] Dataset entry:\n%s", json.dumps(entry, indent=2))
 
@@ -572,7 +540,7 @@ def _fetch_cargo_toml(upstream: str, sub_path: str = "") -> str | None:
     import urllib.request
     suffix = f"/{sub_path.strip('/')}" if sub_path else ""
     for branch in ("main", "master"):
-        url = f"https://raw.githubusercontent.com/{upstream}{suffix}/{branch}/Cargo.toml" if sub_path else f"https://raw.githubusercontent.com/{upstream}/{branch}/Cargo.toml"
+        url = f"https://raw.githubusercontent.com/{upstream}/{branch}{suffix}/Cargo.toml"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "kaiju-prepare"})
             with urllib.request.urlopen(req, timeout=15) as r:
@@ -632,19 +600,19 @@ def main() -> None:
         description="Prepare a Rust repo for commit0 dataset"
     )
     parser.add_argument(
-        "--upstream",
-        default=None,
-        help="Upstream repo (e.g. open-telemetry/opentelemetry-rust). Falls back to --repo.",
-    )
-    parser.add_argument(
         "--repo",
         default=None,
-        help="Alias for --upstream (used by the EKS Argo dispatcher).",
+        help="Single repo to prepare (owner/name, e.g. dtolnay/syn).",
+    )
+    parser.add_argument(
+        "--upstream",
+        default=None,
+        help="Alias for --repo (kept for backwards compatibility).",
     )
     parser.add_argument(
         "--output",
-        default=None,
-        help="Path to write generated dataset entries as JSON array.",
+        default="dataset_entries.json",
+        help="Output JSON file (default: dataset_entries.json)",
     )
     parser.add_argument(
         "--crate",
@@ -669,8 +637,14 @@ def main() -> None:
     parser.add_argument(
         "--clone-dir",
         type=Path,
-        default=Path("repos"),
-        help="Directory for local clones (default: ./repos)",
+        default=Path("repos_staging"),
+        help="Directory for local clones (default: ./repos_staging)",
+    )
+    parser.add_argument(
+        "--specs-dir",
+        type=Path,
+        default=Path("specs"),
+        help="Directory to save scraped spec PDFs (default: ./specs)",
     )
     parser.add_argument(
         "--dry-run",
@@ -705,13 +679,13 @@ def main() -> None:
 
     args = parser.parse_args()
 
-    if args.upstream is None:
-        args.upstream = args.repo
-    if not args.upstream:
-        parser.error("either --upstream or --repo is required")
+    if args.repo is None:
+        args.repo = args.upstream
+    if not args.repo:
+        parser.error("--repo is required")
 
     if not all([args.crate, args.src_dir, args.test_cmd]):
-        derived = _derive_rust_defaults(args.upstream)
+        derived = _derive_rust_defaults(args.repo)
         if not args.crate:
             args.crate = derived["crate"]
         if not args.src_dir:
@@ -732,12 +706,13 @@ def main() -> None:
         sys.exit(1)
 
     entry = prepare_rust_repo(
-        upstream=args.upstream,
+        upstream=args.repo,
         crate=args.crate,
         src_dir=args.src_dir,
         test_cmd=args.test_cmd,
         org=args.org,
         clone_dir=args.clone_dir,
+        specs_dir=args.specs_dir,
         dry_run=args.dry_run,
         rust_version=args.rust_version,
         edition=args.edition,
@@ -749,11 +724,10 @@ def main() -> None:
     if entry is None:
         sys.exit(1)
 
-    if args.output:
-        out_path = Path(args.output)
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text(json.dumps([entry], indent=2))
-        logger.info("Wrote dataset entry to %s", out_path)
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps([entry], indent=2))
+    logger.info("Wrote dataset entry to %s", out_path)
 
 
 if __name__ == "__main__":
