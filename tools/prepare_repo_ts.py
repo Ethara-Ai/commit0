@@ -650,7 +650,7 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
     spec_url = _detect_spec_url(repo_dir)
 
     setup_dict = {
-        "node": "20",
+        "node_version": "20",
         "install": install_cmd,
         "packages": packages,
         "pre_install": [],
@@ -672,6 +672,9 @@ def generate_setup_dict_ts(repo_dir: Path) -> tuple[dict, dict, str]:
     return setup_dict, test_dict, test_framework
 
 
+_MAX_EXTRA_SCAN_DIRS = int(os.environ.get("KAIJU_TS_MAX_SCAN_DIRS", "20"))
+
+
 def _collect_extra_scan_dirs(
     repo_dir: Path, src_dir_path: Path, test_dirs: list[Path]
 ) -> list[Path]:
@@ -688,10 +691,18 @@ def _collect_extra_scan_dirs(
             continue
         if child in extra:
             continue
-        # Check if it has .ts files (sibling package)
         ts_files = list(child.glob("**/*.ts"))
         if ts_files:
             extra.append(child)
+
+    if len(extra) > _MAX_EXTRA_SCAN_DIRS:
+        logger.warning(
+            "Capping extra_scan_dirs from %d to %d to prevent stubber OOM "
+            "(override via KAIJU_TS_MAX_SCAN_DIRS env var)",
+            len(extra),
+            _MAX_EXTRA_SCAN_DIRS,
+        )
+        extra = extra[:_MAX_EXTRA_SCAN_DIRS]
 
     return extra
 
