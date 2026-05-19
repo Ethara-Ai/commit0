@@ -738,7 +738,13 @@ def create_ts_stubbed_branch(
         raise ValueError(f"src_dir does not exist: {src_dir_path}")
 
     test_dirs = detect_ts_test_dirs(repo_dir)
-    extra_scan_dirs = _collect_extra_scan_dirs(repo_dir, src_dir_path, test_dirs)
+    if src_dir == ".":
+        extra_scan_dirs: list[Path] = []
+        logger.info(
+            "  src_dir is '.', skipping extra_scan_dirs (whole repo already in scan)"
+        )
+    else:
+        extra_scan_dirs = _collect_extra_scan_dirs(repo_dir, src_dir_path, test_dirs)
 
     if extra_scan_dirs:
         logger.info(

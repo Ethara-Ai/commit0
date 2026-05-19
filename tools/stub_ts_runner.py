@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -90,6 +91,11 @@ def run_stub_ts(
 
     cwd = str(PROJECT_ROOT)
 
+    env = os.environ.copy()
+    heap_mb = env.get("KAIJU_TS_NODE_HEAP_MB", "8192")
+    existing_node_opts = env.get("NODE_OPTIONS", "")
+    env["NODE_OPTIONS"] = f"{existing_node_opts} --max-old-space-size={heap_mb}".strip()
+
     logger.info("Running TS stubber: %s", " ".join(cmd))
     result = subprocess.run(
         cmd,
@@ -97,6 +103,7 @@ def run_stub_ts(
         text=True,
         timeout=timeout,
         cwd=cwd,
+        env=env,
     )
 
     if result.returncode != 0:
